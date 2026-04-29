@@ -2,25 +2,20 @@ import os
 import hashlib
 from ..config import settings
 from ..vector_store import vector_store
-from ..deepseek_client import client as ds
 
 
 class ContextBuilder:
     async def build(self, file_path: str, content: str, tags: list[str] = None) -> dict:
         note_id = hashlib.md5(file_path.encode()).hexdigest()
 
-        embedding_result = await ds.embed([content[:3000]])
-        embedding = embedding_result[0]
+        similar_notes = vector_store.search_similar(content, n=settings.max_context_notes)
 
-        similar_notes = vector_store.search_similar(embedding, n=settings.max_context_notes)
-
-        linked_notes = await self._read_linked_notes(file_path, tags or [])
+        linked_notes = self._read_linked_notes(file_path, tags or [])
 
         vector_store.add_or_update(
             note_id=note_id,
             title=os.path.basename(file_path).replace(".md", ""),
             content=content,
-            embedding=embedding,
             metadata={"path": file_path, "tags": ",".join(tags or [])},
         )
 
@@ -35,12 +30,11 @@ class ContextBuilder:
             "total_notes": vector_store.count(),
         }
 
-    async def _read_linked_notes(self, file_path: str, tags: list[str]) -> list[str]:
+    def _read_linked_notes(self, file_path: str, tags: list[str]) -> list[str]:
         vault = settings.vault_path
         if not vault or not os.path.isdir(vault):
             return []
 
-        # Find notes with same tags
         related = []
         note_basename = os.path.basename(file_path)
 
