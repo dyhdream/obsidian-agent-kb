@@ -1,12 +1,43 @@
 import uvicorn
 from fastapi import FastAPI
+from pydantic import BaseModel
+
 from .config import settings
+from .orchestrator import orchestrator
+from .vector_store import vector_store
 
 app = FastAPI(title="Obsidian Agent KB", version="0.1.0")
 
 
+class AnalyzeRequest(BaseModel):
+    file_path: str
+    content: str
+    tags: list[str] = []
+
+
+class FeedbackRequest(BaseModel):
+    action_type: str
+    suggestion: str
+    accepted: bool
+
+
 @app.get("/health")
 async def health():
+    return {
+        "status": "ok",
+        "note_count": vector_store.count(),
+    }
+
+
+@app.post("/api/analyze")
+async def analyze(req: AnalyzeRequest):
+    result = await orchestrator.analyze(req.file_path, req.content, req.tags)
+    return result
+
+
+@app.post("/api/feedback")
+async def feedback(req: FeedbackRequest):
+    orchestrator.record_feedback(req.action_type, req.suggestion, req.accepted)
     return {"status": "ok"}
 
 

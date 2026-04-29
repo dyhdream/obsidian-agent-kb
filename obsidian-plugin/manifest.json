@@ -1,0 +1,10 @@
+{
+  "id": "obsidian-agent-kb",
+  "name": "Agent KB",
+  "version": "0.1.0",
+  "minAppVersion": "1.5.0",
+  "description": "多 Agent 协作自动知识库管家 —— 保存时自动分析链接、标签、结构",
+  "author": "dyhdream",
+  "authorUrl": "https://github.com/dyhdream/obsidian-agent-kb",
+  "isDesktopOnly": true
+}

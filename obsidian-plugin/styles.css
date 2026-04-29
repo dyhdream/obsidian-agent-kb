@@ -1,0 +1,90 @@
+.agent-kb-modal .agent-kb-section {
+  margin-bottom: 16px;
+}
+
+.agent-kb-modal .agent-kb-section-title {
+  font-weight: 600;
+  margin-bottom: 8px;
+  padding-bottom: 4px;
+  border-bottom: 1px solid var(--background-modifier-border);
+}
+
+.agent-kb-modal .agent-kb-item {
+  display: flex;
+  align-items: flex-start;
+  padding: 6px 0;
+  border-bottom: 1px solid var(--background-modifier-border-hover);
+}
+
+.agent-kb-modal .agent-kb-item-content {
+  flex: 1;
+  margin-right: 8px;
+}
+
+.agent-kb-modal .agent-kb-item-actions {
+  display: flex;
+  gap: 4px;
+  flex-shrink: 0;
+}
+
+.agent-kb-modal .agent-kb-item-reason {
+  font-size: 0.85em;
+  color: var(--text-muted);
+}
+
+.agent-kb-modal .agent-kb-btn-accept {
+  color: var(--color-green);
+  cursor: pointer;
+  padding: 2px 6px;
+  border-radius: 4px;
+}
+
+.agent-kb-modal .agent-kb-btn-reject {
+  color: var(--text-muted);
+  cursor: pointer;
+  padding: 2px 6px;
+  border-radius: 4px;
+}
+
+.agent-kb-modal .agent-kb-btn-accept:hover {
+  background-color: rgba(var(--color-green-rgb), 0.15);
+}
+
+.agent-kb-modal .agent-kb-btn-reject:hover {
+  background-color: var(--background-modifier-hover);
+}
+
+.agent-kb-modal .agent-kb-badge {
+  display: inline-block;
+  padding: 1px 6px;
+  border-radius: 4px;
+  font-size: 0.75em;
+  font-weight: 600;
+  margin-right: 4px;
+}
+
+.agent-kb-modal .agent-kb-badge-link {
+  background-color: rgba(var(--color-blue-rgb), 0.15);
+  color: var(--color-blue);
+}
+
+.agent-kb-modal .agent-kb-badge-tag {
+  background-color: rgba(var(--color-yellow-rgb), 0.15);
+  color: var(--color-yellow);
+}
+
+.agent-kb-modal .agent-kb-badge-moc {
+  background-color: rgba(var(--color-purple-rgb), 0.15);
+  color: var(--color-purple);
+}
+
+.agent-kb-modal .agent-kb-badge-structure {
+  background-color: rgba(var(--color-orange-rgb), 0.15);
+  color: var(--color-orange);
+}
+
+.agent-kb-modal .agent-kb-summary {
+  font-size: 0.85em;
+  color: var(--text-muted);
+  margin-bottom: 12px;
+}
