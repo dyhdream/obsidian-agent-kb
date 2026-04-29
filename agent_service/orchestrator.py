@@ -133,6 +133,7 @@ class Orchestrator:
         # ── 链接师产出立刻推送 ──
         findings = self.blackboard.read("findings")
         yield sse("links", {
+            "phase": "links",
             "links": findings.get("links", []),
             "concepts": findings.get("concepts", []),
             "orphans": findings.get("orphans", []),
@@ -145,6 +146,7 @@ class Orchestrator:
         # ── 架构师产出立刻推送 ──
         findings = self.blackboard.read("findings")
         yield sse("structure", {
+            "phase": "structure",
             "tags": findings.get("tags", []),
             "structure": findings.get("structure", {}),
         })
@@ -156,6 +158,7 @@ class Orchestrator:
         # ── 最终品控结果 ──
         review = self.blackboard.read("review")
         yield sse("done", {
+            "phase": "done",
             "suggestions": review.get("suggestions", []),
             "summary": review.get("summary", ""),
             "agent_status": {
