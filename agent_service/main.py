@@ -1,6 +1,7 @@
 import uvicorn
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
 from .config import settings
@@ -50,6 +51,15 @@ async def health():
 async def analyze(req: AnalyzeRequest):
     result = await orchestrator.analyze(req.file_path, req.content, req.tags, req.session_id)
     return result
+
+
+@app.post("/api/analyze/stream")
+async def analyze_stream(req: AnalyzeRequest):
+    return StreamingResponse(
+        orchestrator.analyze_stream(req.file_path, req.content, req.tags),
+        media_type="text/event-stream",
+        headers={"X-Accel-Buffering": "no", "Cache-Control": "no-cache"},
+    )
 
 
 @app.get("/api/progress/{session_id}")
