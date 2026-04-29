@@ -3,7 +3,12 @@ import re
 from ..deepseek_client import client as ds
 from ..preference_learner import preference_learner
 
-STRUCTURE_OPTIMIZER_SYSTEM = """你是一个知识库结构优化专家。你的任务是根据当前笔记的内容和元数据，检查结构合理性和维护建议。
+STRUCTURE_OPTIMIZER_SYSTEM = """你是一个 Obsidian 知识库结构优化专家。你的任务是根据当前笔记的内容和元数据，检查结构合理性和维护建议。
+
+格式规范提醒：
+- YAML frontmatter 应包含 aliases、tags、created 等字段
+- 内部链接统一使用 [[笔记标题]] 格式
+- 标签归一化：全小写、中划线连接（如 #machine-learning 而非 #MachineLearning）
 
 严格按以下 JSON 格式输出，不要输出任何其他内容：
 {
