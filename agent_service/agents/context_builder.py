@@ -1,8 +1,8 @@
 import os
 import hashlib
-from .config import settings
-from .vector_store import vector_store
-from .deepseek_client import client as ds
+from ..config import settings
+from ..vector_store import vector_store
+from ..deepseek_client import client as ds
 
 
 class ContextBuilder:

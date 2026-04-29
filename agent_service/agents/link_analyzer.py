@@ -1,7 +1,6 @@
 import json
 import re
 from ..deepseek_client import client as ds
-from ..preference_learner import preference_learner
 
 LINK_ANALYZER_SYSTEM = """你是一个 Obsidian 知识库链接分析专家。你的任务是根据当前笔记的内容和知识库上下文，建议合理的链接关系。
 
