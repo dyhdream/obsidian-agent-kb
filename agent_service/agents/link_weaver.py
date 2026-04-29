@@ -51,55 +51,52 @@ class LinkWeaver(Agent):
 
     def user_prompt(self) -> str:
         current = self.blackboard.read("current")
-        similar = self.blackboard.read("similar")
         vault = self.blackboard.read("vault")
+        context = self.blackboard.read("context")
         findings = self.blackboard.read("findings")
 
-        # 情报员分析结果
-        key_entities = findings.get("key_entities", [])
-        scout_notes = findings.get("scout_notes", "")
-
-        # 已有链接（从内容中提取）
-        import re
         content = current.get("content", "")
+        key_entities = findings.get("key_entities", [])
+
+        import re
         existing = re.findall(r"\[\[([^\]|]+)", content)
-        existing_str = "\n".join(f"- [[{w.strip()}]]" for w in existing[:20]) if existing else "无"
+        existing_str = "\n".join(f"- [[{w.strip()}]]" for w in existing[:15]) if existing else "无"
 
-        # 相似笔记
-        similar_lines = ""
-        for n in similar[:5]:
-            similar_lines += f"- {n['title']} (相关度: {1 - n.get('distance', 0):.2f})\n"
+        # 同目录笔记（关联最大）
+        same_dir = context.get("same_dir", [])
+        same_str = "\n".join(f"- {n['title']} (@ {n.get('dir', '')}, tags: {','.join(n.get('tags',[])[:3])})" for n in same_dir)
+        if not same_str:
+            same_str = "无"
 
-        # 已有笔记列表（只有这些可以被建议链接）
+        # 标题匹配
+        matched = context.get("matched", [])
+        matched_str = "\n".join(f"- {n['title']}" for n in matched) if matched else "无"
+
+        # 全量标题（链接候选）
         all_titles = vault.get("all_titles", [])
-        titles_lines = "\n".join(f"- {t['title']}" for t in all_titles[:50])
-        if len(all_titles) > 50:
-            titles_lines += f"\n... 还有 {len(all_titles) - 50} 篇"
+        titles_str = "\n".join(f"- {t['title']}" for t in all_titles[:80])
+        if len(all_titles) > 80:
+            titles_str += f"\n... 还有 {len(all_titles) - 80} 篇"
 
         return f"""当前笔记: {current.get('title', '')}
-路径: {current.get('file_path', '')}
 标签: {', '.join(current.get('tags', []))}
 
-情报员发现: {scout_notes}
-核心实体: {', '.join(key_entities[:10])}
-
-当前笔记中已有链接（不要重复建议）:
+已有链接（不要重复）:
 {existing_str}
 
-相似笔记:
-{similar_lines}
+◇ 同目录笔记（关联最大，优先考虑）:
+{same_str}
 
-可用笔记列表（只有这些标题可以被建议链接，不在列表中的放入 new_concepts）:
-{titles_lines}
+◇ 标题匹配:
+{matched_str}
 
-Vault 笔记总数: {vault.get('total_notes', 0)}
+◇ 可用笔记列表（只有这些可以建议 [[链接]]）:
+{titles_str}
 
-笔记内容 (截取):
----
-{content[:3000]}
----
+核心实体: {', '.join(key_entities[:8])}
+笔记总数: {vault.get('total_notes', 0)}
 
-请输出 JSON 分析结果。"""
+输出 JSON。"""
 
     def handle_response(self, raw: str) -> bool:
         parsed = self.parse_json(raw)

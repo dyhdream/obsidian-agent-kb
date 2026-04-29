@@ -5,7 +5,7 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
 from .config import settings
-from .orchestrator import orchestrator, progress_registry
+from .orchestrator import orchestrator
 from .vector_store import vector_store
 from .usage_tracker import usage_tracker
 
@@ -53,21 +53,17 @@ async def analyze(req: AnalyzeRequest):
     return result
 
 
-@app.post("/api/analyze/stream")
-async def analyze_stream(req: AnalyzeRequest):
-    return StreamingResponse(
-        orchestrator.analyze_stream(req.file_path, req.content, req.tags),
-        media_type="text/event-stream",
-        headers={"X-Accel-Buffering": "no", "Cache-Control": "no-cache"},
-    )
+@app.post("/api/analyze/start")
+async def analyze_start(req: AnalyzeRequest):
+    """启动异步分析，立即返回 session_id。"""
+    sid = orchestrator.start_analyze(req.file_path, req.content, req.tags)
+    return {"session_id": sid}
 
 
-@app.get("/api/progress/{session_id}")
-async def get_progress(session_id: str):
-    progress = progress_registry.get(session_id)
-    if progress:
-        return progress
-    return {"phase": "unknown", "label": "未找到该会话"}
+@app.get("/api/analyze/results/{session_id}")
+async def get_results(session_id: str):
+    """轮询获取当前进度和已有结果。"""
+    return orchestrator.get_results(session_id)
 
 
 @app.post("/api/feedback")

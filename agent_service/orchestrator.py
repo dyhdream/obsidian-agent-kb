@@ -2,11 +2,12 @@
 新编排器 — Agent 协作工作流
 情报员 → 链接师 → 架构师 → 品控官
 黑板驱动，前一 Agent 的产出对后续 Agent 可见。
-支持进度追踪 + SSE 流式输出。
+支持异步后台分析 + 轮询获取增量结果。
 """
 
 import json
 import time
+import asyncio
 from .blackboard import Blackboard
 from .agents.context_scout import ContextScout
 from .agents.link_weaver import LinkWeaver
@@ -16,158 +17,197 @@ from .agents.note_splitter import note_splitter
 from .preference_learner import preference_learner
 from .session_memory import session_memory
 
-# 全局进度追踪
-progress_registry: dict[str, dict] = {}
+# 全局结果存储: session_id → {status, phase, results, ...}
+result_store: dict[str, dict] = {}
 
 
 class Orchestrator:
-    def __init__(self):
-        self.blackboard = Blackboard()
-
     async def analyze(self, file_path: str, content: str, tags: list[str] = None, session_id: str = "") -> dict:
-        """执行完整的 Agent 协作流程。"""
+        """同步版（向后兼容），返回完整结果。"""
         tags = tags or []
         sid = session_id or str(int(time.time() * 1000))
 
-        def set_progress(phase: str, label: str):
-            progress_registry[sid] = {
-                "phase": phase,
-                "label": label,
-                "session_id": sid,
-                "timestamp": time.time(),
-            }
+        bb = Blackboard()
+        bb.clear_session()
+        ContextScout.scan_vault(file_path, content, tags, bb)
 
-        # 重设会话黑名单
-        self.blackboard.clear_session()
-
-        # ── Phase 1: 情报员扫描 Vault ──
-        set_progress("scout", "扫描知识库...")
-        ContextScout.scan_vault(file_path, content, tags, self.blackboard)
-
-        # ── Phase 2: 情报员 LLM 分析 ──
-        set_progress("scout_llm", "情报员分析中...")
         try:
-            await ContextScout(self.blackboard).run()
+            await ContextScout(bb).run()
         except Exception:
             pass
 
-        # ── Phase 3: 链接师 ──
-        set_progress("link_weaver", "链接师分析中...")
-        link_result = await LinkWeaver(self.blackboard).run()
+        link_result = await LinkWeaver(bb).run()
+        structure_result = await StructureGuardian(bb).run()
+        review_result = await Reviewer(bb).run()
 
-        # ── Phase 4: 架构师 ──
-        set_progress("structure_guardian", "架构师分析中...")
-        structure_result = await StructureGuardian(self.blackboard).run()
+        return self._build_response(sid, file_path, bb, link_result, structure_result, review_result)
 
-        # ── Phase 5: 品控官 ──
-        set_progress("reviewer", "品控官审核中...")
-        review_result = await Reviewer(self.blackboard).run()
+    def start_analyze(self, file_path: str, content: str, tags: list[str] = None) -> str:
+        """启动异步分析，立即返回 session_id。结果通过 get_results() 轮询获取。"""
+        sid = str(int(time.time() * 1000))
+        tags = tags or []
 
-        set_progress("done", "完成")
+        result_store[sid] = {
+            "status": "running",
+            "phase": "queued",
+            "label": "排队中...",
+            "suggestions": [],
+            "done": False,
+        }
 
-        review = self.blackboard.read("review")
-        findings = self.blackboard.read("findings")
+        asyncio.create_task(self._run_analysis(sid, file_path, content, tags))
+        return sid
 
+    async def _run_analysis(self, sid: str, file_path: str, content: str, tags: list[str]):
+        bb = Blackboard()
+        bb.clear_session()
+
+        def update(phase: str, label: str, suggestions: list = None):
+            store = result_store.get(sid, {})
+            store.update({"phase": phase, "label": label})
+            if suggestions:
+                store["suggestions"] = list(store.get("suggestions", []))
+                store["suggestions"].extend(suggestions)
+            result_store[sid] = store
+
+        # Phase 1: 情报员扫描
+        update("scout", "扫描知识库...")
+        ContextScout.scan_vault(file_path, content, tags, bb)
+
+        # Phase 2: 情报员 LLM
+        update("scout_llm", "情报员分析中...")
+        try:
+            await ContextScout(bb).run()
+        except Exception:
+            pass
+
+        # Phase 3: 链接师
+        update("link_weaver", "链接师分析中...")
+        link_result = await LinkWeaver(bb).run()
+
+        # ── 链接师产出立刻可读 ──
+        findings = bb.read("findings")
+        link_sugs = self._format_link_findings(findings, file_path)
+        update("link_weaver", "链接师完成", link_sugs)
+
+        # Phase 4: 架构师
+        update("structure_guardian", "架构师分析中...")
+        structure_result = await StructureGuardian(bb).run()
+
+        # ── 架构师产出立刻可读 ──
+        findings = bb.read("findings")
+        struct_sugs = self._format_structure_findings(findings, file_path)
+        update("structure_guardian", "架构师完成", struct_sugs)
+
+        # Phase 5: 品控官
+        update("reviewer", "品控官审核中...")
+        review_result = await Reviewer(bb).run()
+
+        # ── 最终结果 ──
+        review = bb.read("review")
+        final_sugs = review.get("suggestions", [])
+        update("done", "完成", final_sugs)
+
+        result_store[sid]["done"] = True
+        result_store[sid]["status"] = "done"
+
+    def get_results(self, session_id: str) -> dict:
+        """获取当前进度和已有结果。"""
+        return result_store.get(session_id, {
+            "status": "not_found",
+            "phase": "unknown",
+            "suggestions": [],
+            "done": True,
+        })
+
+    def _format_link_findings(self, findings: dict, file_path: str) -> list[dict]:
+        sugs = []
+        for l in findings.get("links", []):
+            sugs.append({
+                "type": "link", "priority": 1,
+                "title": "链接到 [[" + l.get("target", "") + "]]",
+                "description": "锚点: \"" + l.get("anchor_text", "") + "\" — " + l.get("reason", ""),
+            })
+        for c in findings.get("concepts", []):
+            sugs.append({
+                "type": "concept", "priority": 2,
+                "title": "可新建: " + str(c),
+                "description": "知识库中暂无此概念对应笔记",
+            })
+        for o in findings.get("orphans", []):
+            sugs.append({
+                "type": "orphan", "priority": 3,
+                "title": "孤岛笔记: " + str(o.get("note_title", o.get("note_id", ""))),
+                "description": o.get("reason", ""),
+            })
+        return sugs
+
+    def _format_structure_findings(self, findings: dict, file_path: str) -> list[dict]:
+        sugs = []
+        for t in findings.get("tags", []):
+            sugs.append({
+                "type": "tag", "priority": 3,
+                "title": "#" + t.get("current", "") + " → #" + t.get("suggested", ""),
+                "description": t.get("reason", ""),
+            })
+
+        struct = findings.get("structure", {})
+        split = struct.get("split", {})
+        if split.get("needs_split"):
+            sugs.append({
+                "type": "structure", "priority": 2,
+                "title": "建议拆分笔记",
+                "description": split.get("reason", "") + " → 主题: " + "、".join(split.get("suggested_topics", [])),
+            })
+
+        fm = struct.get("frontmatter", {})
+        missing = fm.get("missing_fields", [])
+        if missing:
+            sugs.append({
+                "type": "structure", "priority": 1,
+                "title": "前言字段缺失",
+                "description": "缺少: " + "、".join(missing),
+            })
+
+        moc = struct.get("moc", {})
+        if moc.get("needs_moc"):
+            sugs.append({
+                "type": "moc", "priority": 3,
+                "title": "建议创建 MOC: " + moc.get("topic", ""),
+                "description": moc.get("reason", ""),
+            })
+        return sugs
+
+    def _build_response(self, sid, file_path, bb, link_result, structure_result, review_result):
+        review = bb.read("review")
+        findings = bb.read("findings")
         return {
             "session_id": sid,
             "file_path": file_path,
-            "title": self.blackboard.read("current").get("title", ""),
+            "title": bb.read("current").get("title", ""),
             "context": {
-                "note_count": self.blackboard.read("vault").get("total_notes", 0),
-                "similar_count": len(self.blackboard.read("similar")),
+                "note_count": bb.read("vault").get("total_notes", 0),
                 "agent_status": {
-                    "scout": "ok",
                     "link_weaver": link_result.get("status"),
                     "structure_guardian": structure_result.get("status"),
                     "reviewer": review_result.get("status"),
                 },
             },
             "suggestions": {
-                "link": {
-                    "links": findings.get("links", []),
-                    "orphans": findings.get("orphans", []),
-                    "new_concepts": findings.get("concepts", []),
-                },
+                "link": {"links": findings.get("links", []), "orphans": findings.get("orphans", []), "new_concepts": findings.get("concepts", [])},
                 "structure": findings.get("structure", {}),
                 "tags": findings.get("tags", []),
             },
-            "review": {
-                "suggestions": review.get("suggestions", []),
-                "summary": review.get("summary", ""),
-                "conflicts": review.get("conflicts", []),
-            },
+            "review": {"suggestions": review.get("suggestions", []), "summary": review.get("summary", "")},
         }
 
     def record_feedback(self, action_type: str, suggestion: str, accepted: bool):
         preference_learner.record(action_type, suggestion, accepted)
-
         if not accepted:
             session_memory.record_rejection(action_type, suggestion)
 
     async def split_note(self, file_path: str, content: str, topics: list[str]) -> dict:
         return await note_splitter.split(file_path, content, topics)
-
-    async def analyze_stream(self, file_path: str, content: str, tags: list[str] = None):
-        """SSE 流式分析。每个 Agent 产出立刻 yield 给前端。"""
-        tags = tags or []
-        self.blackboard.clear_session()
-
-        def sse(event: str, data: dict) -> str:
-            return f"data: {json.dumps(data, ensure_ascii=False)}\n\n"
-
-        # Phase 1: 情报员扫描
-        yield sse("progress", {"phase": "scout", "label": "扫描知识库..."})
-        ContextScout.scan_vault(file_path, content, tags, self.blackboard)
-
-        # Phase 2: 情报员 LLM
-        yield sse("progress", {"phase": "scout_llm", "label": "情报员分析中..."})
-        try:
-            await ContextScout(self.blackboard).run()
-        except Exception:
-            pass
-
-        # Phase 3: 链接师
-        yield sse("progress", {"phase": "link_weaver", "label": "链接师分析中..."})
-        link_result = await LinkWeaver(self.blackboard).run()
-
-        # ── 链接师产出立刻推送 ──
-        findings = self.blackboard.read("findings")
-        yield sse("links", {
-            "phase": "links",
-            "links": findings.get("links", []),
-            "concepts": findings.get("concepts", []),
-            "orphans": findings.get("orphans", []),
-        })
-
-        # Phase 4: 架构师
-        yield sse("progress", {"phase": "structure_guardian", "label": "架构师分析中..."})
-        structure_result = await StructureGuardian(self.blackboard).run()
-
-        # ── 架构师产出立刻推送 ──
-        findings = self.blackboard.read("findings")
-        yield sse("structure", {
-            "phase": "structure",
-            "tags": findings.get("tags", []),
-            "structure": findings.get("structure", {}),
-        })
-
-        # Phase 5: 品控官
-        yield sse("progress", {"phase": "reviewer", "label": "品控官审核中..."})
-        review_result = await Reviewer(self.blackboard).run()
-
-        # ── 最终品控结果 ──
-        review = self.blackboard.read("review")
-        yield sse("done", {
-            "phase": "done",
-            "suggestions": review.get("suggestions", []),
-            "summary": review.get("summary", ""),
-            "agent_status": {
-                "scout": "ok",
-                "link_weaver": link_result.get("status"),
-                "structure_guardian": structure_result.get("status"),
-                "reviewer": review_result.get("status"),
-            },
-        })
 
 
 orchestrator = Orchestrator()
