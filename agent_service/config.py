@@ -13,13 +13,26 @@ class Settings(BaseSettings):
     vault_path: str = ""
     data_db_path: str = "./data"
 
+    # 上下文
     max_context_notes: int = 5
     max_note_chars: int = 3000
 
-    embedding_provider: str = "deepseek"
+    # Agent LLM 调用参数
+    agent_temperature: float = 0.3
+    agent_max_tokens: int = 2048
+    agent_max_retries: int = 2
+    agent_api_timeout: int = 60
+
+    # 会话管理
+    session_ttl_seconds: int = 300  # result_store 过期时间
+    session_cleanup_interval: int = 60  # 清理检查间隔
+
+    # Vault 索引
+    vault_mtime_tolerance: float = 0.5  # 修改时间容差(秒)
+    frontmatter_parse_lines: int = 30  # 前端解析行数
 
     log_level: str = "INFO"
-    reload: bool = False  # 开发模式，生产请设为 false
+    reload: bool = False
 
     # DeepSeek v4 Flash 定价 (RMB / 百万 tokens)
     price_prompt_per_million: float = 0.27

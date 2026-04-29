@@ -1,6 +1,5 @@
-import json
-import re
 from ..deepseek_client import client as ds
+from ..utils import parse_json
 
 SPLIT_SYSTEM = """你是一个 Obsidian 知识库笔记撰写专家。输出必须严格遵循 Obsidian 格式规范。
 
@@ -57,16 +56,10 @@ class NoteSplitter:
         ]
 
         raw = await ds.chat(messages, temperature=0.3, max_tokens=4096)
-        return self._parse_json(raw)
+        return parse_json(raw)
 
     def _parse_json(self, raw: str) -> dict:
-        match = re.search(r"\{[\s\S]*\}", raw)
-        if match:
-            try:
-                return json.loads(match.group())
-            except json.JSONDecodeError:
-                pass
-        return {"files": [], "remaining": ""}
+        return parse_json(raw)
 
 
 note_splitter = NoteSplitter()

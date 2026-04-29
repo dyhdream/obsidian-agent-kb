@@ -3,13 +3,13 @@ Agent 基类 — 统一扮演者接口。
 每个 Agent 拥有：身份(role) + 工具(tools) + 黑板读写权限 + 偏好注入。
 """
 
-import json
-import re
 import time
 from abc import ABC, abstractmethod
 from .deepseek_client import client as ds
 from .preference_learner import preference_learner
 from .session_memory import session_memory
+from .utils import parse_json, parse_json_list
+from .config import settings
 
 
 class Agent(ABC):
@@ -47,7 +47,7 @@ class Agent(ABC):
         system = self.system_prompt()
         user = self.user_prompt()
 
-        max_retries = 2
+        max_retries = settings.agent_max_retries
         for attempt in range(max_retries):
             try:
                 raw = await ds.chat(
@@ -105,20 +105,8 @@ class Agent(ABC):
 
     @staticmethod
     def parse_json(raw: str) -> dict:
-        match = re.search(r"\{[\s\S]*\}", raw)
-        if match:
-            try:
-                return json.loads(match.group())
-            except json.JSONDecodeError:
-                pass
-        return {}
+        return parse_json(raw)
 
     @staticmethod
     def parse_json_list(raw: str) -> list:
-        match = re.search(r"\[[\s\S]*\]", raw)
-        if match:
-            try:
-                return json.loads(match.group())
-            except json.JSONDecodeError:
-                pass
-        return []
+        return parse_json_list(raw)

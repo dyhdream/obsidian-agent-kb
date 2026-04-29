@@ -5,7 +5,6 @@
 支持异步后台分析 + 轮询获取增量结果。
 """
 
-import json
 import time
 import asyncio
 from .blackboard import Blackboard
@@ -16,22 +15,23 @@ from .agents.reviewer import Reviewer
 from .agents.note_splitter import note_splitter
 from .preference_learner import preference_learner
 from .session_memory import session_memory
+from .config import settings
+
+# 全局结果存储
+result_store: dict[str, dict] = {}
+_last_cleanup = 0
 
 # 全局结果存储: session_id → {status, phase, results, ...}
 result_store: dict[str, dict] = {}
 
-# TTL 默认: 300 秒，定期清理
-_SESSION_TTL = 300
-_last_cleanup = 0
-
 def _cleanup_stale_store():
     global _last_cleanup
     now = time.time()
-    if now - _last_cleanup < 60:
+    if now - _last_cleanup < settings.session_cleanup_interval:
         return
     _last_cleanup = now
     stale = [sid for sid, v in result_store.items()
-              if v.get("done") and now - v.get("updated_at", 0) > _SESSION_TTL]
+              if v.get("done") and now - v.get("updated_at", 0) > settings.session_ttl_seconds]
     for sid in stale:
         result_store.pop(sid, None)
 
@@ -76,7 +76,6 @@ class Orchestrator:
         return sid
 
     async def _run_analysis(self, sid: str, file_path: str, content: str, tags: list[str]):
-        import asyncio as _asyncio
         try:
             bb = Blackboard()
             bb.clear_session()
@@ -97,7 +96,7 @@ class Orchestrator:
             update("agents", "链接师 & 架构师分析中...")
             link_task = LinkWeaver(bb).run()
             struct_task = StructureGuardian(bb).run()
-            link_result, struct_result = await _asyncio.gather(link_task, struct_task)
+            link_result, struct_result = await asyncio.gather(link_task, struct_task)
 
             # 合并产出，立刻写入 result_store（不等 reviewer）
             findings = bb.read("findings")
@@ -109,7 +108,7 @@ class Orchestrator:
 
             # Phase 3: 品控官 后台静默，完成后自动追加精化建议
             update("reviewer", "品控官审核中...")
-            review_task = _asyncio.create_task(Reviewer(bb).run())
+            review_task = asyncio.create_task(Reviewer(bb).run())
 
             async def apply_review():
                 try:
@@ -126,7 +125,7 @@ class Orchestrator:
                 result_store[sid]["done"] = True
                 result_store[sid]["status"] = "done"
 
-            _asyncio.create_task(apply_review())
+            asyncio.create_task(apply_review())
 
         except Exception as e:
             result_store[sid] = {

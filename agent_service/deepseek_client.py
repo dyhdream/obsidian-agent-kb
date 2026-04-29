@@ -18,18 +18,20 @@ class DeepSeekClient:
     async def chat(
         self,
         messages: list[dict],
-        temperature: float = 0.3,
-        max_tokens: int = 2048,
+        temperature: float = None,
+        max_tokens: int = None,
     ) -> str:
-        async with httpx.AsyncClient(timeout=60) as client:
+        temp = temperature if temperature is not None else settings.agent_temperature
+        mt = max_tokens if max_tokens is not None else settings.agent_max_tokens
+        async with httpx.AsyncClient(timeout=settings.agent_api_timeout) as client:
             resp = await client.post(
                 f"{self.base_url}/chat/completions",
                 headers=self._headers(),
                 json={
                     "model": self.model,
                     "messages": messages,
-                    "temperature": temperature,
-                    "max_tokens": max_tokens,
+                    "temperature": temp,
+                    "max_tokens": mt,
                 },
             )
             resp.raise_for_status()

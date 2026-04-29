@@ -70,7 +70,7 @@ class VaultIndex:
 
                 existing = known.get(rel)
                 # 只有新文件或修改时间变化才读
-                if existing and abs(existing["mtime"] - mtime) < 0.5:
+                if existing and abs(existing["mtime"] - mtime) < settings.vault_mtime_tolerance:
                     continue
 
                 title, tags, aliases = self._parse_frontmatter(fpath, fname)
@@ -101,7 +101,7 @@ class VaultIndex:
                 first_line = f.readline()
                 if first_line.strip() == "---":
                     lines = []
-                    for _ in range(30):
+                    for _ in range(settings.frontmatter_parse_lines):
                         line = f.readline()
                         if not line or line.strip() == "---":
                             break
