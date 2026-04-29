@@ -6,6 +6,7 @@ from pydantic import BaseModel
 from .config import settings
 from .orchestrator import orchestrator
 from .vector_store import vector_store
+from .usage_tracker import usage_tracker
 
 app = FastAPI(title="Obsidian Agent KB", version="0.1.0")
 
@@ -62,12 +63,27 @@ async def split_note(req: SplitRequest):
     return result
 
 
+@app.get("/api/usage")
+async def get_usage():
+    """获取今日用量和累计用量"""
+    return {
+        "today": usage_tracker.today(),
+        "total": usage_tracker.summary(),
+        "recent": usage_tracker.recent(10),
+        "pricing": {
+            "prompt_per_million": settings.price_prompt_per_million,
+            "completion_per_million": settings.price_completion_per_million,
+            "currency": "RMB",
+        },
+    }
+
+
 def main():
     uvicorn.run(
         "agent_service.main:app",
         host=settings.agent_host,
         port=settings.agent_port,
-        reload=True,
+        reload=settings.reload,
         log_level=settings.log_level.lower(),
     )
 

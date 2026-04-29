@@ -1,5 +1,6 @@
 import httpx
 from .config import settings
+from .usage_tracker import usage_tracker
 
 
 class DeepSeekClient:
@@ -33,6 +34,19 @@ class DeepSeekClient:
             )
             resp.raise_for_status()
             data = resp.json()
+
+            usage = data.get("usage", {})
+            prompt_tokens = usage.get("prompt_tokens", 0)
+            completion_tokens = usage.get("completion_tokens", 0)
+
+            if prompt_tokens or completion_tokens:
+                usage_tracker.record(
+                    model=data.get("model", self.model),
+                    endpoint="chat/completions",
+                    prompt_tokens=prompt_tokens,
+                    completion_tokens=completion_tokens,
+                )
+
             return data["choices"][0]["message"]["content"]
 
     async def embed(self, texts: list[str]) -> list[list[float]]:
@@ -50,6 +64,18 @@ class DeepSeekClient:
             )
             resp.raise_for_status()
             data = resp.json()
+
+            usage = data.get("usage", {})
+            prompt_tokens = usage.get("prompt_tokens", 0) if isinstance(usage, dict) else 0
+
+            if prompt_tokens:
+                usage_tracker.record(
+                    model=data.get("model", "deepseek-embed"),
+                    endpoint="embeddings",
+                    prompt_tokens=prompt_tokens,
+                    completion_tokens=0,
+                )
+
             return [item["embedding"] for item in data["data"]]
 
 
