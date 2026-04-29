@@ -33,6 +33,9 @@ class PreferenceLearner:
         bucket = self.data[key]
         if action_type not in bucket:
             bucket[action_type] = []
+        # 去重：同一条 suggestion 不重复记录
+        if suggestion in bucket[action_type]:
+            return
         bucket[action_type].append(suggestion)
         if len(bucket[action_type]) > 100:
             bucket[action_type] = bucket[action_type][-100:]

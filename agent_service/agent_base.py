@@ -73,11 +73,23 @@ class Agent(ABC):
         thresholds = preference_learner.data.get("thresholds", {})
         rejected = session_memory.get_rejected_in_session()
 
+        # 永久忽略列表
+        perm = preference_learner.data.get("rejected", {}).get("permanent_ignore", [])
+        seen = set()
+        permanent_ignores = []
+        for p in perm[:-30:-1]:  # 最近 30 条
+            if p not in seen:
+                permanent_ignores.append(p)
+                seen.add(p)
+
         lines = ["\n## 用户偏好（动态注入）\n"]
         if rejected:
             rejected_str = "、".join(rejected[:10])
             lines.append(f"- 本次会话中已被拒绝的建议: {rejected_str}")
             lines.append(f"- 如果涉及上述内容，请降低置信度或直接跳过")
+
+        if permanent_ignores:
+            lines.append(f"- 用户永久忽略的主题（不要再建议）: {'、'.join(permanent_ignores[:10])}")
 
         rates = {
             "link": preference_learner.get_accept_rate("link"),
