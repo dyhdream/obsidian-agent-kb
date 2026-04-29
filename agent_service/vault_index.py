@@ -17,7 +17,19 @@ class VaultIndex:
         self.db_path = os.path.join(settings.data_db_path, "vault_index.db")
         os.makedirs(settings.data_db_path, exist_ok=True)
         self._init_db()
-        self._sync()
+        # 只在首次（表空）时全量同步，之后的增量由 scan_vault 触发
+        if self._is_empty():
+            self._sync()
+        else:
+            self._on_change()
+
+    def _is_empty(self) -> bool:
+        try:
+            with sqlite3.connect(self.db_path) as conn:
+                row = conn.execute("SELECT COUNT(*) FROM notes_index").fetchone()
+            return row[0] == 0
+        except Exception:
+            return True
 
     def _init_db(self):
         with sqlite3.connect(self.db_path) as conn:

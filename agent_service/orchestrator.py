@@ -20,6 +20,21 @@ from .session_memory import session_memory
 # 全局结果存储: session_id → {status, phase, results, ...}
 result_store: dict[str, dict] = {}
 
+# TTL 默认: 300 秒，定期清理
+_SESSION_TTL = 300
+_last_cleanup = 0
+
+def _cleanup_stale_store():
+    global _last_cleanup
+    now = time.time()
+    if now - _last_cleanup < 60:
+        return
+    _last_cleanup = now
+    stale = [sid for sid, v in result_store.items()
+              if v.get("done") and now - v.get("updated_at", 0) > _SESSION_TTL]
+    for sid in stale:
+        result_store.pop(sid, None)
+
 
 class Orchestrator:
     async def analyze(self, file_path: str, content: str, tags: list[str] = None, session_id: str = "") -> dict:
@@ -43,7 +58,8 @@ class Orchestrator:
         return self._build_response(sid, file_path, bb, link_result, structure_result, review_result)
 
     def start_analyze(self, file_path: str, content: str, tags: list[str] = None) -> str:
-        """启动异步分析，立即返回 session_id。结果通过 get_results() 轮询获取。"""
+        _cleanup_stale_store()
+
         sid = str(int(time.time() * 1000))
         tags = tags or []
 
@@ -53,6 +69,7 @@ class Orchestrator:
             "label": "排队中...",
             "suggestions": [],
             "done": False,
+            "updated_at": time.time(),
         }
 
         asyncio.create_task(self._run_analysis(sid, file_path, content, tags))
@@ -66,7 +83,7 @@ class Orchestrator:
 
             def update(phase: str, label: str, suggestions: list = None):
                 store = result_store.get(sid, {})
-                store.update({"phase": phase, "label": label})
+                store.update({"phase": phase, "label": label, "updated_at": time.time()})
                 if suggestions:
                     store["suggestions"] = list(store.get("suggestions", []))
                     store["suggestions"].extend(suggestions)
