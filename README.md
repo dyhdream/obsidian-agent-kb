@@ -1,41 +1,52 @@
 # Obsidian Agent KB — 多 Agent 协作自动知识库管家
 
-基于 DeepSeek API + 本地 Agent 服务的 Obsidian 知识库自动管理工具。保存笔记时自动分析内容，提供链接建议、标签标准化、结构优化、笔记拆分/新建、Git 版本控制和偏好学习。
+基于 DeepSeek API + 本地 Agent 服务的 Obsidian 知识库自动管理工具。保存笔记时自动分析内容，4 个 AI Agent 协作产出链接建议、标签标准化、结构优化、笔记拆分/新建，支持偏好学习、Git 版本控制和一键撤销。
 
 ## 架构
 
 ```
-Obsidian Vault ──(onSave)──▶ Obsidian 插件 ──(HTTP)──▶ 本地 Agent 服务 (Python FastAPI)
+Obsidian Vault ──(onSave)──▶ Obsidian 插件 ──(HTTP)──▶ 本地 Agent 服务
                                                               │
-                                         ┌─────────────┬──────┼──────┬─────────────┐
-                                         │             │             │             │
-                                     Agent A       Agent B       Agent C       NoteSplitter
-                                   上下文构建     链接分析器    结构优化器      笔记拆分/创建
-                                         │             │             │             │
-                                         └─────────────┴──────┬──────┴─────────────┘
-                                                              │
-                                                     DeepSeek API (deepseek-v4-flash)
-                                                              │
-                                                      SQLite + TF-IDF 向量库 (本地)
+                                    ┌─────────────────黑板（Blackboard）──────────────┐
+                                    │                                                 │
+                              情报员              链接师              架构师          品控官
+                           ContextScout        LinkWeaver      StructureGuardian    Reviewer
+                          (扫描Vault,0.5s)    (并行,~12s)        (并行,~12s)      (后台静默)
+                                    │                 │                  │            │
+                                    └─────────────────┼──────────────────┴─────┬──────┘
+                                                      │                        │
+                                              首屏建议(~14s)            精化建议(~30s)
+                                                      │                        │
+                                                  展示给用户              自动更新弹窗
 ```
 
+| Agent | 角色 | 产出 |
+|-------|------|------|
+| **情报员** | 扫描 Vault，收集上下文 | 同目录笔记、标题匹配、语义相似笔记 |
+| **链接师** | 发现关联 | 链接建议、新概念提示、孤岛笔记 |
+| **架构师** | 结构检查 | 标签标准化、拆分建议、MOC、frontmatter |
+| **品控官** | 最终审核 | 去重、排序、冲突消解、偏好过滤 |
+
+## 性能
+
+| 指标 | v0.1(串行) | v0.2(并行+优化) |
+|------|-----------|----------------|
+| 首屏建议 | ~37s | **~14s** |
+| 完全精化 | ~37s | ~30s(后台，不阻塞) |
+| LLM 调用次数 | 4 次 | 2 次(并行) + 1 次(后台) |
+| 每次分析读取文件 | 100+ | 0(纯索引查询) |
+
+核心优化：情报员 LLM 移除(省 8s) + 链接师/架构师并行(asyncio.gather) + 品控官后台静默。
+
 > [!important] 强烈推荐搭配 Git 仓库使用
-> 
-> 将你的 Obsidian Vault 初始化为 Git 仓库并绑定远程（GitHub/GitLab）：
+>
 > ```bash
 > cd D:/你的ObsidianVault路径
-> git init
-> git add -A && git commit -m "初始化知识库"
+> git init && git add -A && git commit -m "初始化知识库"
 > git remote add origin git@github.com:你的用户名/知识库.git
 > git push -u origin main
 > ```
-> 
-> 这样做的好处：
-> - 每次采纳建议前自动 git 快照，可**逐次撤销**
-> - 知识库天然拥有**云备份**和**历史回溯**
-> - 跨设备同步 + 协作编辑
-> 
-> 插件首次加载时会自动检测并初始化 git（若无则 `git init`），但绑定远程仍需你手动执行。
+> 每次采纳建议前自动 git 快照，可**逐次撤销**（`git revert`，安全回退，不丢未提交修改）。
 
 ## 功能
 
@@ -43,52 +54,48 @@ Obsidian Vault ──(onSave)──▶ Obsidian 插件 ──(HTTP)──▶ 本
 
 | 功能 | 说明 |
 |------|------|
-| **自动链接建议** | 语义分析内容，仅建议 vault 中**已存在的笔记**建立链接，过滤已有链接 |
-| **新概念提示** | 值得独立成篇但 vault 中尚不存在的概念，采纳后自动调用 LLM 生成完整笔记 |
-| **标签标准化** | 识别同义标签（如 `AI` / `artificial-intelligence`），归一化命名并批量替换 |
-| **笔记拆分** | 检测超过 800 字多主题笔记，采纳后自动切割内容、创建子笔记、精简原笔记 |
-| **孤岛笔记提醒** | 标记连接数 < 2 的孤立笔记，建议关联 |
-| **MOC 自动维护** | 标签簇达到阈值时建议创建/更新 MOC（Map of Content） |
-| **前言检查** | 检测缺失的 YAML frontmatter 字段（aliases、tags、created） |
+| **自动链接建议** | 仅建议 vault 中已存在的笔记，硬过滤已有链接 + 不存在的文件 |
+| **新概念提示** | vault 中不存在的概念，采纳后自动调用 LLM 生成完整 Obsidian 格式笔记 |
+| **标签标准化** | 同义标签归一化，正则转义防误伤，空格分隔不堆叠 |
+| **笔记拆分** | 超主题长笔记自动切割，创建子笔记 + 精简原笔记 |
+| **孤岛笔记提醒** | 级联连接数不足的笔记，建议关联 |
+| **MOC 建议** | 标签簇达阈值时建议创建 Map of Content |
+| **frontmatter 检查** | aliases、tags、created 等字段完整性 |
 
 ### 用户体验
 
 | 功能 | 说明 |
 |------|------|
-| **已处理 / 共发现** | 弹窗实时显示建议处理进度，全部处理完自动关闭 |
-| **一键采纳/忽略** | 绿色「采纳」按钮执行操作 + 记录偏好，灰色「忽略」仅记录偏好 |
-| **防级联** | 插件自身操作（拆分、创建）不会触发新一轮分析 |
-| **3 秒防抖** | 同一文件短期内不重复分析 |
+| **即时反馈** | 保存后弹窗立刻打开，状态栏显示文件名 + 分析阶段 |
+| **渐进式建议** | 链接师/架构师完成后首批建议立刻出现，品控官后台精化 |
+| **动画 dots** | 分析中 `分析中.` → `分析中..` → `分析中...` 轮转，不死寂 |
+| **已处理 / 共发现** | 弹窗实时进度，全部处理自动关闭 |
+| **采纳 / 忽略 / 永不要** | 三个按钮，永久忽略写入偏好学习，后续不再出现 |
+| **防级联** | 插件自身操作不触发新分析，`_pendingPaths` + 3s 防抖 |
+| **autoAnalyzeOnSave 开关** | 设置中关闭后保存不触发 |
 
-### Git 版本控制
+### 安全
 
-| 功能 | 说明 |
+| 措施 | 说明 |
 |------|------|
-| **自动快照** | 每次采纳建议前，git 自动提交当前 vault 状态（`[Agent KB] link: ...`） |
-| **一键撤销** | `Ctrl+P` → "撤销 Agent KB 上次修改"，`git reset --hard HEAD~1` 回退 |
-| **自动初始化** | 首次加载插件时自动 `git init` 并创建 `.gitignore` |
+| **CORS 限制** | `allow_origin_regex` 仅允许 `app://` 和 `localhost` |
+| **Shell 注入防御** | 所有 git 命令用 `cp.execFile` 参数数组，不再字符串拼接 |
+| **Git 安全回退** | `git revert` 替代 `git reset --hard`，保留历史且不丢未保存修改 |
 
 ### 偏好学习
 
-本地记录用户接受/拒绝历史，动态调整拆分阈值、合并阈值、MOC 阈值等。
-
-### Obsidian 格式
-
-所有 Agent 输出强制遵循 Obsidian 规范：
-- YAML frontmatter（`aliases`、`tags`、`created`）
-- `[[wiki链接]]` 替代 Markdown 链接
-- 标题从 `##` 开始（文件名即一级标题）
-- callout 语法（`> [!tip]` / `> [!note]` / `> [!warning]`）
-- 内嵌标签 `#tag`
+- 会话记忆：当前 server session 内拒绝的建议不再出现
+- 永久忽略：用户点「永不要」后写入偏好，跨 session 生效
+- 采纳率统计：每种建议类型的历史采纳率注入 Agent prompt 动态调整
+- 偏好去重：同一条 suggestion 不重复记录，数据干净
 
 ## 快速开始
 
-### 1. 前提条件
+### 1. 前提
 
 - Python 3.10+
-- Node.js（Obsidian 插件天然支持）
-- Git（用于版本控制）
-- DeepSeek API Key（[获取地址](https://platform.deepseek.com)）
+- Git
+- DeepSeek API Key（[platform.deepseek.com](https://platform.deepseek.com)）
 
 ### 2. 配置
 
@@ -98,59 +105,57 @@ cd obsidian-agent-kb
 cp .env.example .env
 # 编辑 .env：
 #   DEEPSEEK_API_KEY=sk-xxx
-#   VAULT_PATH=D:/your/path/to/obsidian/vault
+#   VAULT_PATH=D:/your/obsidian/vault
 ```
 
-### 3. 启动 Agent 服务
+### 3. 启动服务
 
 ```bash
-cd agent_service
-pip install -r requirements.txt
+pip install -r agent_service/requirements.txt
 python -m agent_service.main
-# 服务运行在 http://127.0.0.1:9527
+# → http://127.0.0.1:9527
 ```
 
-### 4. 安装 Obsidian 插件
+### 4. 安装插件
 
-```bash
-cp -r obsidian-plugin/ <你的vault>/.obsidian/plugins/agent-kb/
-```
-
-在 Obsidian 设置 → 第三方插件 → 启用 "Agent KB"。
+将 `obsidian-plugin/` 目录复制到 vault 的 `.obsidian/plugins/agent-kb/`，在设置中启用。
 
 ### 5. 验证
 
-重启 Obsidian，状态栏左下角应显示 `Agent KB`。保存任意 `.md` 文件，右下角弹出分析建议。
+重启 Obsidian，状态栏显示 `Agent KB`。保存 `.md` → 弹窗打开 → 14s 后出建议。
 
-## 使用方式
+## 使用
 
 | 操作 | 方式 |
 |------|------|
-| 触发分析 | 保存 `.md` 文件（自动），或 `Ctrl+P` → "立即分析当前笔记" |
-| 采纳建议 | 弹窗中点击绿色「采纳」按钮 |
-| 忽略建议 | 弹窗中点击灰色「忽略」按钮 |
+| 触发分析 | 保存 `.md`（自动），或 `Ctrl+P` → "立即分析当前笔记" |
+| 采纳建议 | 弹窗绿色按钮，执行操作 + 记录偏好 |
+| 忽略建议 | 灰色按钮，本次不再提示 |
+| 永久不要 | 右侧小字按钮，写入 preference，以后也不再建议 |
 | 撤销修改 | `Ctrl+P` → "撤销 Agent KB 上次修改" |
-| 调整设置 | 设置 → 第三方插件 → Agent KB（服务地址、最低置信度等） |
+| 设置 | 设置 → 第三方插件 → Agent KB |
 
-## API 端点
+## API
 
 | 端点 | 方法 | 说明 |
 |------|------|------|
 | `/health` | GET | 服务状态 + 笔记数量 |
-| `/api/analyze` | POST | 分析单篇笔记（file_path、content、tags） |
-| `/api/split` | POST | 拆分笔记 / 生成新概念笔记（file_path、content、topics） |
-| `/api/feedback` | POST | 记录用户反馈（action_type、suggestion、accepted） |
+| `/api/analyze` | POST | 同步分析（向后兼容） |
+| `/api/analyze/start` | POST | 启动异步分析，返回 `session_id` |
+| `/api/analyze/results/{sid}` | GET | 轮询当前进度 + 增量建议 |
+| `/api/split` | POST | 拆分笔记 / 生成新概念 |
+| `/api/feedback` | POST | 记录反馈（action_type/suggestion/accepted） |
+| `/api/usage` | GET | 今日/累计 Token 用量 + 花费 |
 
-## 成本估算
+## 成本
 
-使用 `deepseek-v4-flash` 模型：
+`deepseek-v4-flash`，索引查询零 token：
 
-| 场景 | Token 消耗 | 费用（约） |
-|------|-----------|-----------|
-| 单次分析（< 3000 字笔记） | ~6K | ~0.0015 元 |
-| 单次拆分 / 新建概念 | ~10K | ~0.0025 元 |
-| 日均 10 篇笔记 | ~150K | ~0.04 元 |
-| 月均 | ~4.5M | ~1.2 元 |
+| 场景 | Token | 费用 |
+|------|-------|------|
+| 单次分析 | ~3K | ~¥0.001 |
+| 日均 10 篇 | ~30K | ~¥0.01 |
+| 月均 | ~900K | ~¥0.3 |
 
 ## 技术栈
 
@@ -158,33 +163,42 @@ cp -r obsidian-plugin/ <你的vault>/.obsidian/plugins/agent-kb/
 |------|------|
 | Agent 服务 | Python FastAPI + uvicorn |
 | 推理引擎 | DeepSeek API（deepseek-v4-flash） |
-| 向量化 | sklearn TfidfVectorizer（纯本地，零 API 调用） |
-| 向量存储 | SQLite |
-| 插件开发 | Obsidian Plugin API（CommonJS） |
-| 版本控制 | Git（自动提交 + 一键撤销） |
+| 索引 | SQLite（VaultIndex）+ TF-IDF（title + 首 200 字） |
+| 插件 | Obsidian Plugin API（CommonJS，ES5 兼容） |
+| 版本控制 | Git（execFile 参数化 + git revert） |
 
 ## 项目结构
 
 ```
 obsidian-agent-kb/
 ├── agent_service/
-│   ├── main.py                    # FastAPI 入口
-│   ├── config.py                  # 配置（pydantic-settings）
-│   ├── deepseek_client.py         # DeepSeek API 封装
-│   ├── orchestrator.py            # 编排器（并行调度）
-│   ├── vector_store.py            # SQLite + TF-IDF 向量库
-│   ├── preference_learner.py      # 偏好学习
+│   ├── main.py                    # FastAPI 入口 + 所有 API 端点
+│   ├── config.py                  # pydantic-settings 配置（所有魔术数字）
+│   ├── blackboard.py              # Agent 共享黑板
+│   ├── agent_base.py              # Agent 基类（偏好注入 + JSON 解析）
+│   ├── orchestrator.py            # 编排器（并行调度 + 后台 reviewer） ｜
+│   ├── deepseek_client.py         # DeepSeek API 封装 + usage 追踪
+│   ├── vector_store.py            # SQLite + TF-IDF 轻量向量库
+│   ├── vault_index.py             # vault 元数据索引（标题/标签/目录/mtime）
+│   ├── preference_learner.py      # 偏好学习（接受率 + 去重）
+│   ├── session_memory.py          # 会话记忆（当次拒绝不再提）
+│   ├── usage_tracker.py           # Token 用量 + 费用追踪
+│   ├── utils.py                   # 公共工具（parse_json 等）
 │   ├── agents/
-│   │   ├── context_builder.py     # Agent A：上下文构建
-│   │   ├── link_analyzer.py       # Agent B：链接分析 + 新概念
-│   │   ├── structure_optimizer.py # Agent C：结构优化
-│   │   └── note_splitter.py       # 笔记拆分 / 新概念生成
+│   │   ├── context_scout.py       # 情报员（纯索引查询，不读文件）
+│   │   ├── link_weaver.py         # 链接师（硬过滤不存在笔记 + 已存在链接）
+│   │   ├── structure_guardian.py  # 架构师
+│   │   ├── reviewer.py            # 品控官
+│   │   └── note_splitter.py       # 笔记拆分
 │   └── requirements.txt
 ├── obsidian-plugin/
-│   ├── main.ts                    # 插件入口（TypeScript 源文件）
+│   ├── main.js                    # 插件入口（ES5，零构建）
+│   ├── main.ts                    # TypeScript 源文件
 │   ├── manifest.json
-│   ├── settings.ts                # 设置面板
-│   └── styles.css                 # 弹窗样式
+│   ├── settings.ts
+│   └── styles.css
+├── tests/
+│   └── test_e2e.py                # E2E 全链路测试
 ├── .env.example
 ├── .gitignore
 └── README.md
