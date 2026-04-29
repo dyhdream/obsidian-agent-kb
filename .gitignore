@@ -26,6 +26,6 @@ Thumbs.db
 .trash/
 
 # Runtime data
-chroma_db/
+data/
 preferences.json
 *.db

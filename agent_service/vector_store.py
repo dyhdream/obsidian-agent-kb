@@ -13,8 +13,8 @@ from .config import settings
 
 class VectorStore:
     def __init__(self):
-        os.makedirs(settings.chroma_db_path, exist_ok=True)
-        self.db_path = os.path.join(settings.chroma_db_path, "vectors.db")
+        os.makedirs(settings.data_db_path, exist_ok=True)
+        self.db_path = os.path.join(settings.data_db_path, "vectors.db")
         self._init_db()
         # 只索引短文本 (标题 + 前 200 字)
         self.vectorizer = TfidfVectorizer(max_features=256, analyzer="char_wb", ngram_range=(2, 4))

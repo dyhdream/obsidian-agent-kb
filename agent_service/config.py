@@ -11,7 +11,7 @@ class Settings(BaseSettings):
     agent_port: int = 9527
 
     vault_path: str = ""
-    chroma_db_path: str = "./chroma_db"
+    data_db_path: str = "./data"
 
     max_context_notes: int = 5
     max_note_chars: int = 3000

@@ -14,8 +14,8 @@ from .config import settings
 class VaultIndex:
     def __init__(self):
         self.vault = settings.vault_path
-        self.db_path = os.path.join(settings.chroma_db_path, "vault_index.db")
-        os.makedirs(settings.chroma_db_path, exist_ok=True)
+        self.db_path = os.path.join(settings.data_db_path, "vault_index.db")
+        os.makedirs(settings.data_db_path, exist_ok=True)
         self._init_db()
         self._sync()
 
