@@ -4,7 +4,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
 from .config import settings
-from .orchestrator import orchestrator
+from .orchestrator import orchestrator, progress_registry
 from .vector_store import vector_store
 from .usage_tracker import usage_tracker
 
@@ -23,6 +23,7 @@ class AnalyzeRequest(BaseModel):
     file_path: str
     content: str
     tags: list[str] = []
+    session_id: str = ""
 
 
 class FeedbackRequest(BaseModel):
@@ -47,8 +48,16 @@ async def health():
 
 @app.post("/api/analyze")
 async def analyze(req: AnalyzeRequest):
-    result = await orchestrator.analyze(req.file_path, req.content, req.tags)
+    result = await orchestrator.analyze(req.file_path, req.content, req.tags, req.session_id)
     return result
+
+
+@app.get("/api/progress/{session_id}")
+async def get_progress(session_id: str):
+    progress = progress_registry.get(session_id)
+    if progress:
+        return progress
+    return {"phase": "unknown", "label": "未找到该会话"}
 
 
 @app.post("/api/feedback")

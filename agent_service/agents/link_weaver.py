@@ -105,7 +105,6 @@ Vault 笔记总数: {vault.get('total_notes', 0)}
         parsed = self.parse_json(raw)
         findings = self.blackboard.read("findings")
 
-        # 过滤已存在的链接
         import re
         content = self.blackboard.read("current").get("content", "")
         existing = set(
@@ -113,12 +112,33 @@ Vault 笔记总数: {vault.get('total_notes', 0)}
             for w in re.findall(r"\[\[([^\]|]+)", content)
         )
 
+        # 已存在的笔记标题集合（硬过滤，不依赖 LLM 守规矩）
+        all_titles = self.blackboard.read("vault").get("all_titles", [])
+        valid_titles = {t["title"].lower(): t for t in all_titles}
+
         links = parsed.get("links", [])
-        filtered_links = [
-            l for l in links
-            if l.get("target", "").lower() not in existing
-            and l.get("confidence", 0) >= 0.5
-        ]
+        filtered_links = []
+        skipped = []
+
+        for l in links:
+            target = l.get("target", "").strip()
+            target_lower = target.lower()
+
+            if target_lower in existing:
+                skipped.append(f"跳过已存在链接: {target}")
+                continue
+            if target_lower not in valid_titles:
+                skipped.append(f"跳过不存在的笔记: {target}")
+                continue
+            if l.get("confidence", 0) < 0.5:
+                skipped.append(f"置信度不足: {target}")
+                continue
+
+            filtered_links.append(l)
+
+        if skipped:
+            import logging
+            logging.getLogger("agent_kb").info(f"链接师硬过滤: {'; '.join(skipped)}")
 
         findings.update({
             "links": filtered_links,

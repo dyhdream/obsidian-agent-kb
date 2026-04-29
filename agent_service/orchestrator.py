@@ -2,8 +2,10 @@
 新编排器 — Agent 协作工作流
 情报员 → 链接师 → 架构师 → 品控官
 黑板驱动，前一 Agent 的产出对后续 Agent 可见。
+支持进度追踪（session_id → progress dict）。
 """
 
+import time
 from .blackboard import Blackboard
 from .agents.context_scout import ContextScout
 from .agents.link_weaver import LinkWeaver
@@ -13,41 +15,60 @@ from .agents.note_splitter import note_splitter
 from .preference_learner import preference_learner
 from .session_memory import session_memory
 
+# 全局进度追踪
+progress_registry: dict[str, dict] = {}
+
 
 class Orchestrator:
     def __init__(self):
         self.blackboard = Blackboard()
 
-    async def analyze(self, file_path: str, content: str, tags: list[str] = None) -> dict:
+    async def analyze(self, file_path: str, content: str, tags: list[str] = None, session_id: str = "") -> dict:
         """执行完整的 Agent 协作流程。"""
         tags = tags or []
+        sid = session_id or str(int(time.time() * 1000))
 
-        # 重设会话黑名单（每次分析复用同一会话记忆）
+        def set_progress(phase: str, label: str):
+            progress_registry[sid] = {
+                "phase": phase,
+                "label": label,
+                "session_id": sid,
+                "timestamp": time.time(),
+            }
+
+        # 重设会话黑名单
         self.blackboard.clear_session()
 
         # ── Phase 1: 情报员扫描 Vault ──
+        set_progress("scout", "扫描知识库...")
         ContextScout.scan_vault(file_path, content, tags, self.blackboard)
 
-        # ── Phase 2: 情报员 LLM 分析（可选轻量分析） ──
+        # ── Phase 2: 情报员 LLM 分析 ──
+        set_progress("scout_llm", "情报员分析中...")
         try:
             await ContextScout(self.blackboard).run()
-        except Exception as e:
-            # 情报员失败不算致命，继续
+        except Exception:
             pass
 
         # ── Phase 3: 链接师 ──
+        set_progress("link_weaver", "链接师分析中...")
         link_result = await LinkWeaver(self.blackboard).run()
 
-        # ── Phase 4: 架构师（能看到链接师产出） ──
+        # ── Phase 4: 架构师 ──
+        set_progress("structure_guardian", "架构师分析中...")
         structure_result = await StructureGuardian(self.blackboard).run()
 
         # ── Phase 5: 品控官 ──
+        set_progress("reviewer", "品控官审核中...")
         review_result = await Reviewer(self.blackboard).run()
+
+        set_progress("done", "完成")
 
         review = self.blackboard.read("review")
         findings = self.blackboard.read("findings")
 
         return {
+            "session_id": sid,
             "file_path": file_path,
             "title": self.blackboard.read("current").get("title", ""),
             "context": {
