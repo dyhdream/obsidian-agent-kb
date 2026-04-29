@@ -59,57 +59,64 @@ class Orchestrator:
         return sid
 
     async def _run_analysis(self, sid: str, file_path: str, content: str, tags: list[str]):
-        bb = Blackboard()
-        bb.clear_session()
-
-        def update(phase: str, label: str, suggestions: list = None):
-            store = result_store.get(sid, {})
-            store.update({"phase": phase, "label": label})
-            if suggestions:
-                store["suggestions"] = list(store.get("suggestions", []))
-                store["suggestions"].extend(suggestions)
-            result_store[sid] = store
-
-        # Phase 1: 情报员扫描
-        update("scout", "扫描知识库...")
-        ContextScout.scan_vault(file_path, content, tags, bb)
-
-        # Phase 2: 情报员 LLM
-        update("scout_llm", "情报员分析中...")
         try:
-            await ContextScout(bb).run()
-        except Exception:
-            pass
+            bb = Blackboard()
+            bb.clear_session()
 
-        # Phase 3: 链接师
-        update("link_weaver", "链接师分析中...")
-        link_result = await LinkWeaver(bb).run()
+            def update(phase: str, label: str, suggestions: list = None):
+                store = result_store.get(sid, {})
+                store.update({"phase": phase, "label": label})
+                if suggestions:
+                    store["suggestions"] = list(store.get("suggestions", []))
+                    store["suggestions"].extend(suggestions)
+                result_store[sid] = store
 
-        # ── 链接师产出立刻可读 ──
-        findings = bb.read("findings")
-        link_sugs = self._format_link_findings(findings, file_path)
-        update("link_weaver", "链接师完成", link_sugs)
+            # Phase 1: 情报员扫描
+            update("scout", "扫描知识库...")
+            ContextScout.scan_vault(file_path, content, tags, bb)
 
-        # Phase 4: 架构师
-        update("structure_guardian", "架构师分析中...")
-        structure_result = await StructureGuardian(bb).run()
+            # Phase 2: 情报员 LLM
+            update("scout_llm", "情报员分析中...")
+            try:
+                await ContextScout(bb).run()
+            except Exception:
+                pass
 
-        # ── 架构师产出立刻可读 ──
-        findings = bb.read("findings")
-        struct_sugs = self._format_structure_findings(findings, file_path)
-        update("structure_guardian", "架构师完成", struct_sugs)
+            # Phase 3: 链接师
+            update("link_weaver", "链接师分析中...")
+            link_result = await LinkWeaver(bb).run()
 
-        # Phase 5: 品控官
-        update("reviewer", "品控官审核中...")
-        review_result = await Reviewer(bb).run()
+            findings = bb.read("findings")
+            link_sugs = self._format_link_findings(findings, file_path)
+            update("link_weaver", "链接师完成", link_sugs)
 
-        # ── 最终结果 ──
-        review = bb.read("review")
-        final_sugs = review.get("suggestions", [])
-        update("done", "完成", final_sugs)
+            # Phase 4: 架构师
+            update("structure_guardian", "架构师分析中...")
+            structure_result = await StructureGuardian(bb).run()
 
-        result_store[sid]["done"] = True
-        result_store[sid]["status"] = "done"
+            findings = bb.read("findings")
+            struct_sugs = self._format_structure_findings(findings, file_path)
+            update("structure_guardian", "架构师完成", struct_sugs)
+
+            # Phase 5: 品控官
+            update("reviewer", "品控官审核中...")
+            review_result = await Reviewer(bb).run()
+
+            review = bb.read("review")
+            final_sugs = review.get("suggestions", [])
+            update("done", "完成", final_sugs)
+
+            result_store[sid]["done"] = True
+            result_store[sid]["status"] = "done"
+
+        except Exception as e:
+            result_store[sid] = {
+                "status": "error",
+                "phase": "error",
+                "label": str(e)[:200],
+                "suggestions": [],
+                "done": True,
+            }
 
     def get_results(self, session_id: str) -> dict:
         """获取当前进度和已有结果。"""
