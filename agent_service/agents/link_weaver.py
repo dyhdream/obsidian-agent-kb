@@ -137,11 +137,10 @@ class LinkWeaver(Agent):
             import logging
             logging.getLogger("agent_kb").info(f"链接师硬过滤: {'; '.join(skipped)}")
 
-        findings.update({
+        self.blackboard.update("findings", {
             "links": filtered_links,
             "concepts": parsed.get("new_concepts", []),
             "orphans": parsed.get("orphans", []),
             "link_notes": parsed.get("notes", ""),
         })
-        self.blackboard.write("findings", findings)
         return True

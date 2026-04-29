@@ -96,9 +96,8 @@ Vault 笔记总数: {vault.get('total_notes', 0)}
 
     def handle_response(self, raw: str) -> bool:
         parsed = self.parse_json(raw)
-        findings = self.blackboard.read("findings")
 
-        findings.update({
+        self.blackboard.update("findings", {
             "tags": parsed.get("tag_suggestions", []),
             "structure": {
                 "frontmatter": parsed.get("frontmatter_issues", {}),
@@ -108,5 +107,4 @@ Vault 笔记总数: {vault.get('total_notes', 0)}
             },
             "structure_notes": parsed.get("notes", ""),
         })
-        self.blackboard.write("findings", findings)
         return True

@@ -59,6 +59,7 @@ class Orchestrator:
         return sid
 
     async def _run_analysis(self, sid: str, file_path: str, content: str, tags: list[str]):
+        import asyncio as _asyncio
         try:
             bb = Blackboard()
             bb.clear_session()
@@ -71,51 +72,49 @@ class Orchestrator:
                     store["suggestions"].extend(suggestions)
                 result_store[sid] = store
 
-            # Phase 1: 情报员扫描
+            # Phase 1: 情报员扫描 (无 LLM，< 0.5s)
             update("scout", "扫描知识库...")
             ContextScout.scan_vault(file_path, content, tags, bb)
 
-            # Phase 2: 情报员 LLM
-            update("scout_llm", "情报员分析中...")
-            try:
-                await ContextScout(bb).run()
-            except Exception:
-                pass
+            # Phase 2: 链接师 + 架构师 并行 (~12s，而非串行 24s)
+            update("agents", "链接师 & 架构师分析中...")
+            link_task = LinkWeaver(bb).run()
+            struct_task = StructureGuardian(bb).run()
+            link_result, struct_result = await _asyncio.gather(link_task, struct_task)
 
-            # Phase 3: 链接师
-            update("link_weaver", "链接师分析中...")
-            link_result = await LinkWeaver(bb).run()
-
+            # 合并产出，立刻写入 result_store（不等 reviewer）
             findings = bb.read("findings")
-            link_sugs = self._format_link_findings(findings, file_path)
-            update("link_weaver", "链接师完成", link_sugs)
+            all_sugs = (
+                self._format_link_findings(findings, file_path) +
+                self._format_structure_findings(findings, file_path)
+            )
+            update("agents", "产出建议中...", all_sugs)
 
-            # Phase 4: 架构师
-            update("structure_guardian", "架构师分析中...")
-            structure_result = await StructureGuardian(bb).run()
-
-            findings = bb.read("findings")
-            struct_sugs = self._format_structure_findings(findings, file_path)
-            update("structure_guardian", "架构师完成", struct_sugs)
-
-            # Phase 5: 品控官
+            # Phase 3: 品控官 后台静默，完成后自动追加精化建议
             update("reviewer", "品控官审核中...")
-            review_result = await Reviewer(bb).run()
+            review_task = _asyncio.create_task(Reviewer(bb).run())
 
-            review = bb.read("review")
-            final_sugs = review.get("suggestions", [])
-            update("done", "完成", final_sugs)
+            async def apply_review():
+                try:
+                    await review_task
+                    review = bb.read("review")
+                    final = review.get("suggestions", [])
+                    if final:
+                        # 品控官产出覆盖之前未精化的建议
+                        result_store[sid]["suggestions"] = final
+                        result_store[sid]["phase"] = "done"
+                        result_store[sid]["label"] = "完成"
+                except Exception:
+                    pass
+                result_store[sid]["done"] = True
+                result_store[sid]["status"] = "done"
 
-            result_store[sid]["done"] = True
-            result_store[sid]["status"] = "done"
+            _asyncio.create_task(apply_review())
 
         except Exception as e:
             result_store[sid] = {
-                "status": "error",
-                "phase": "error",
-                "label": str(e)[:200],
-                "suggestions": [],
-                "done": True,
+                "status": "error", "phase": "error",
+                "label": str(e)[:200], "suggestions": [], "done": True,
             }
 
     def get_results(self, session_id: str) -> dict:
