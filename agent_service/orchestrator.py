@@ -1,9 +1,8 @@
-import os
 import asyncio
-import traceback
 from .agents.context_builder import context_builder
 from .agents.link_analyzer import link_analyzer
 from .agents.structure_optimizer import structure_optimizer
+from .agents.note_splitter import note_splitter
 from .preference_learner import preference_learner
 
 
@@ -39,6 +38,9 @@ class Orchestrator:
 
     def record_feedback(self, action_type: str, suggestion: str, accepted: bool):
         preference_learner.record(action_type, suggestion, accepted)
+
+    async def split_note(self, file_path: str, content: str, topics: list[str]) -> dict:
+        return await note_splitter.split(file_path, content, topics)
 
 
 orchestrator = Orchestrator()

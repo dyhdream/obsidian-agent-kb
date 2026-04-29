@@ -11,6 +11,7 @@ class ContextBuilder:
         similar_notes = vector_store.search_similar(content, n=settings.max_context_notes)
 
         linked_notes = self._read_linked_notes(file_path, tags or [])
+        all_titles = self._list_all_titles(file_path)
 
         vector_store.add_or_update(
             note_id=note_id,
@@ -27,8 +28,26 @@ class ContextBuilder:
             "tags": tags or [],
             "similar_notes": similar_notes,
             "linked_notes": linked_notes,
+            "all_titles": all_titles,
             "total_notes": vector_store.count(),
         }
+
+    def _list_all_titles(self, current_path: str) -> list[dict]:
+        vault = settings.vault_path
+        if not vault or not os.path.isdir(vault):
+            return []
+        current_basename = os.path.basename(current_path)
+        titles = []
+        for root, _, files in os.walk(vault):
+            if ".obsidian" in root or ".trash" in root:
+                continue
+            for fname in files:
+                if not fname.endswith(".md") or fname == current_basename:
+                    continue
+                rel = os.path.relpath(os.path.join(root, fname), vault)
+                title = os.path.splitext(fname)[0]
+                titles.append({"title": title, "path": rel})
+        return titles
 
     def _read_linked_notes(self, file_path: str, tags: list[str]) -> list[str]:
         vault = settings.vault_path

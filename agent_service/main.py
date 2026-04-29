@@ -30,6 +30,12 @@ class FeedbackRequest(BaseModel):
     accepted: bool
 
 
+class SplitRequest(BaseModel):
+    file_path: str
+    content: str
+    topics: list[str]
+
+
 @app.get("/health")
 async def health():
     return {
@@ -48,6 +54,12 @@ async def analyze(req: AnalyzeRequest):
 async def feedback(req: FeedbackRequest):
     orchestrator.record_feedback(req.action_type, req.suggestion, req.accepted)
     return {"status": "ok"}
+
+
+@app.post("/api/split")
+async def split_note(req: SplitRequest):
+    result = await orchestrator.split_note(req.file_path, req.content, req.topics)
+    return result
 
 
 def main():
