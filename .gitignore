@@ -28,3 +28,4 @@ Thumbs.db
 # Runtime data
 chroma_db/
 preferences.json
+*.db
