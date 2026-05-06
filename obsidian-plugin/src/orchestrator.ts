@@ -1,7 +1,7 @@
 /**
- * 编排器 — Agent 协作工作流
- * 情报员 → 链接师 + 架构师 → 品控官
- * 黑板驱动，前一 Agent 的产出对后续 Agent 可见。
+ * 编排器 — Agent 协作工作流（优化版）
+ * 情报员(纯本地) → 链接师+架构师(并行) → 品控官(后台异步)
+ * 首屏建议先行：链接师+架构师完成后立即展示，品控官后台精化后回调更新
  */
 
 import { App, TFile } from "obsidian";
@@ -10,21 +10,17 @@ import { ContextScout } from "./agents/context_scout";
 import { LinkWeaver } from "./agents/link_weaver";
 import { StructureGuardian } from "./agents/structure_guardian";
 import { Reviewer } from "./agents/reviewer";
+import { extractKeyEntities } from "./vault_context";
 import { PreferenceLearner } from "./preference_learner";
 import { sessionMemory } from "./session_memory";
 import { AgentKBSettings } from "../settings";
 
 export type AnalysisPhase = "scout" | "agents" | "reviewer" | "done";
 
-export interface AnalysisResult {
-  suggestions: FinalSuggestion[];
-  summary: string;
-  phase: AnalysisPhase;
-}
-
 export interface AnalysisCallbacks {
   onPhase?: (phase: AnalysisPhase, label: string) => void;
-  onSuggestions?: (suggestions: FinalSuggestion[]) => void;
+  onPhase2Complete?: (suggestions: FinalSuggestion[]) => void;
+  onReviewerComplete?: (suggestions: FinalSuggestion[]) => void;
 }
 
 export class Orchestrator {
@@ -41,7 +37,13 @@ export class Orchestrator {
   }
 
   /**
-   * 完整分析流程
+   * 分析流程（优化版）：
+   * 1. scanVault（纯本地，瞬间完成）
+   * 2. 客户端提取 keyEntities（替代 ContextScout LLM，瞬间完成）
+   * 3. LinkWeaver + StructureGuardian 并行 → 回调通知首屏建议
+   * 4. Reviewer 后台异步 → 回调通知精化建议
+   *
+   * 返回的 Promise 在阶段 3 完成后 resolve（不等 Reviewer）
    */
   async analyze(
     app: App,
@@ -49,55 +51,52 @@ export class Orchestrator {
     content: string,
     tags: string[],
     callbacks?: AnalysisCallbacks
-  ): Promise<AnalysisResult> {
+  ): Promise<FinalSuggestion[]> {
     const bb = new Blackboard();
     bb.clearSession();
 
-    // Phase 1: 情报员扫描 (纯 Obsidian API，无 LLM)
+    // Phase 1: 情报员扫描（纯 Obsidian API，< 0.1s）
     callbacks?.onPhase?.("scout", "扫描知识库...");
     ContextScout.scanVault(app, file, content, tags, bb);
 
-    try {
-      await new ContextScout(bb, this.settings, this.preferenceLearner).run();
-    } catch {
-      // 情报员 LLM 失败不影响后续
-    }
+    // 客户端提取 keyEntities（替代 ContextScout LLM，0 LLM 调用）
+    const keyEntities = extractKeyEntities(content, tags);
+    bb.updateFindings({ keyEntities });
 
-    // Phase 2: 链接师 + 架构师 并行 (~12s)
+    // Phase 2: 链接师 + 架构师 并行（~6-8s）
     callbacks?.onPhase?.("agents", "链接师 & 架构师分析中...");
-    const [linkResult, structResult] = await Promise.all([
+    await Promise.all([
       new LinkWeaver(bb, this.settings, this.preferenceLearner).run(),
       new StructureGuardian(bb, this.settings, this.preferenceLearner).run(),
     ]);
 
-    // 合并中间产出
-    const midSuggestions = this.buildIntermediateSuggestions(bb, file.path);
-    callbacks?.onSuggestions?.(midSuggestions);
+    // 首屏建议：立即构建并通知
+    const phase2Suggestions = this.buildIntermediateSuggestions(bb, file.path);
+    callbacks?.onPhase2Complete?.(phase2Suggestions);
 
-    // Phase 3: 品控官
+    // Phase 3: 品控官后台异步（不阻塞返回）
     callbacks?.onPhase?.("reviewer", "品控官审核中...");
-    try {
-      await new Reviewer(bb, this.settings, this.preferenceLearner).run();
-    } catch {
-      // 品控官失败，使用中间产出
-    }
-
-    // 构建最终结果
-    const review = bb.read("review");
-    const finalSuggestions = review.suggestions.length > 0 ? review.suggestions : midSuggestions;
+    this.runReviewerAsync(bb, callbacks);
 
     callbacks?.onPhase?.("done", "完成");
-
-    return {
-      suggestions: finalSuggestions,
-      summary: review.summary || "分析完成",
-      phase: "done",
-    };
+    return phase2Suggestions;
   }
 
   /**
-   * 记录用户反馈
+   * 后台运行 Reviewer，完成后通过回调通知
    */
+  private async runReviewerAsync(bb: Blackboard, callbacks?: AnalysisCallbacks): Promise<void> {
+    try {
+      await new Reviewer(bb, this.settings, this.preferenceLearner).run();
+      const review = bb.read("review");
+      if (review.suggestions.length > 0) {
+        callbacks?.onReviewerComplete?.(review.suggestions);
+      }
+    } catch {
+      // Reviewer 失败不影响已有建议
+    }
+  }
+
   recordFeedback(actionType: string, suggestion: string, accepted: boolean): void {
     this.preferenceLearner.record(actionType, suggestion, accepted);
     if (!accepted) {
@@ -105,14 +104,10 @@ export class Orchestrator {
     }
   }
 
-  /**
-   * 构建中间建议（品控官产出前）
-   */
   private buildIntermediateSuggestions(bb: Blackboard, filePath: string): FinalSuggestion[] {
     const findings = bb.read("findings");
     const sugs: FinalSuggestion[] = [];
 
-    // 链接师产出
     for (const l of findings.links || []) {
       sugs.push({
         type: "link",
@@ -138,7 +133,6 @@ export class Orchestrator {
       });
     }
 
-    // 架构师产出
     for (const t of findings.tags || []) {
       sugs.push({
         type: "tag",

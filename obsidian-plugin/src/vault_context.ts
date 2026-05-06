@@ -184,3 +184,75 @@ export function collectVaultContext(
     existingTags: Array.from(allTags).slice(0, 100),
   };
 }
+
+/**
+ * 客户端提取核心实体（替代 ContextScout LLM）
+ * 从笔记内容中提取高频名词、已有链接目标、标签作为核心实体
+ */
+export function extractKeyEntities(content: string, tags: string[]): string[] {
+  const entities: Set<string> = new Set();
+
+  // 已有链接目标
+  const linkRegex = /\[\[([^\]|]+)/g;
+  let match: RegExpExecArray | null;
+  while ((match = linkRegex.exec(content)) !== null) {
+    entities.add(match[1].trim());
+  }
+
+  // 标签
+  tags.forEach((t) => entities.add(t));
+
+  // 提取中文关键词（连续中文字符 ≥ 2）和英文技术词（首字母大写或全大写）
+  const chineseRegex = /[\u4e00-\u9fa5]{2,6}/g;
+  const engRegex = /\b[A-Z][a-zA-Z]{2,}\b/g;
+  const engAllCaps = /\b[A-Z]{2,}\b/g;
+
+  const wordCount: Map<string, number> = new Map();
+  const countWord = (w: string) => wordCount.set(w, (wordCount.get(w) || 0) + 1);
+
+  let m: RegExpExecArray | null;
+  while ((m = chineseRegex.exec(content)) !== null) countWord(m[0]);
+  while ((m = engRegex.exec(content)) !== null) countWord(m[0]);
+  while ((m = engAllCaps.exec(content)) !== null) countWord(m[0]);
+
+  // 取出现 ≥ 2 次的高频词
+  for (const [word, count] of wordCount) {
+    if (count >= 2 && word.length >= 2) {
+      entities.add(word);
+    }
+  }
+
+  return Array.from(entities).slice(0, 12);
+}
+
+/**
+ * 获取优先排序的标题列表（限制 30 个）
+ * 优先级：同目录 > 标题匹配 > 相似度 > 其余
+ */
+export function getPrioritizedTitles(
+  ctx: VaultContextResult,
+  excludePaths: Set<string>
+): TitleEntry[] {
+  const seen = new Set<string>();
+  const result: TitleEntry[] = [];
+
+  const add = (entries: TitleEntry[]) => {
+    for (const e of entries) {
+      if (seen.has(e.path) || excludePaths.has(e.path)) continue;
+      seen.add(e.path);
+      result.push(e);
+      if (result.length >= 30) return;
+    }
+  };
+
+  add(ctx.sameDir);
+  add(ctx.matched);
+  add(ctx.similar.map((s) => ({ title: s.title, path: s.path, dir: "", tags: s.tags })));
+
+  // 不够 30 个再补全
+  if (result.length < 30) {
+    add(ctx.allTitles);
+  }
+
+  return result;
+}

@@ -81,7 +81,7 @@ Vault 笔记总数: ${vault.totalNotes}
 
 笔记内容 (截取):
 ---
-${content.slice(0, 3000)}
+${content.slice(0, 2000)}
 ---
 
 请输出 JSON 分析结果。`;
