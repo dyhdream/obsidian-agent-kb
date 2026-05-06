@@ -8,10 +8,14 @@ import {
   TFile,
 } from "obsidian";
 import { AgentKBSettings, DEFAULT_SETTINGS } from "./settings";
+import { initClient } from "./src/deepseek_client";
+import { Orchestrator, AnalysisCallbacks } from "./src/orchestrator";
+import { PreferenceLearner } from "./src/preference_learner";
+import { FinalSuggestion } from "./src/blackboard";
 
 interface Suggestion {
   id: string;
-  type: "link" | "tag" | "moc" | "structure" | "orphan";
+  type: "link" | "tag" | "moc" | "structure" | "orphan" | "concept";
   title: string;
   description: string;
   action?: () => void;
@@ -79,12 +83,34 @@ class SuggestionModal extends Modal {
 
 export default class AgentKBPlugin extends Plugin {
   settings: AgentKBSettings;
+  private orchestrator: Orchestrator | null = null;
+  private preferenceLearner: PreferenceLearner | null = null;
+  private debounceTimer: number | null = null;
+  private isAnalyzing = false;
+  private lastAnalyzed: Map<string, { hash: string; time: number }> = new Map();
 
   async onload() {
     await this.loadSettings();
 
+    // 初始化 DeepSeek 客户端
+    initClient(this.settings);
+
+    // 初始化偏好学习器（持久化到 Obsidian data）
+    const savedPrefs = (await this.loadData())?.preferences || {};
+    this.preferenceLearner = new PreferenceLearner(
+      (data) => {
+        this.saveData({ ...this.data, preferences: data });
+      },
+      savedPrefs
+    );
+
+    // 初始化编排器
+    this.orchestrator = new Orchestrator(this.settings, this.preferenceLearner);
+
+    // 注册保存事件
     this.app.vault.on("modify", this.onFileSave.bind(this));
 
+    // 注册设置面板
     this.addSettingTab(new AgentKBSettingTab(this.app, this));
   }
 
@@ -92,118 +118,96 @@ export default class AgentKBPlugin extends Plugin {
     if (!this.settings.autoAnalyzeOnSave) return;
     if (!(file instanceof TFile)) return;
     if (file.extension !== "md") return;
+    if (this.isAnalyzing) return;
+
+    // 清除之前的防抖定时器
+    if (this.debounceTimer) {
+      clearTimeout(this.debounceTimer);
+    }
+
+    // 设置新的防抖定时器
+    this.debounceTimer = window.setTimeout(
+      () => this.doAnalyze(file),
+      this.settings.debounceMs
+    );
+  }
+
+  private async doAnalyze(file: TFile) {
+    if (!this.orchestrator) return;
 
     try {
+      this.isAnalyzing = true;
       const content = await this.app.vault.read(file);
       const tags = this.extractTags(content);
+      const contentHash = await this.calculateHash(content);
 
-      const resp = await fetch(`${this.settings.agentUrl}/api/analyze`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          file_path: file.path,
-          content: content,
-          tags: tags,
-        }),
-      });
+      // 检查是否已分析过（30 秒内同内容跳过）
+      const last = this.lastAnalyzed.get(file.path);
+      if (last && last.hash === contentHash && Date.now() - last.time < 30000) {
+        return;
+      }
 
-      if (!resp.ok) return;
+      this.lastAnalyzed.set(file.path, { hash: contentHash, time: Date.now() });
 
-      const data = await resp.json();
-      const suggestions = this.parseSuggestions(data);
+      // 显示进度提示
+      const notice = new Notice("Agent KB 分析中...", 0);
+
+      const callbacks: AnalysisCallbacks = {
+        onPhase: (_phase, label) => {
+          notice.setMessage(`Agent KB: ${label}`);
+        },
+      };
+
+      const result = await this.orchestrator.analyze(
+        this.app,
+        file,
+        content,
+        tags,
+        callbacks
+      );
+
+      notice.hide();
+
+      // 转换为插件 Suggestion 格式
+      const suggestions = this.convertSuggestions(result.suggestions);
 
       if (suggestions.length > 0) {
         new Notice(`Agent KB: 发现 ${suggestions.length} 条建议`, 5000);
         new SuggestionModal(this.app, this, suggestions).open();
       }
     } catch (e) {
-      // Silent failure - don't disrupt user
+      console.error("Agent KB 分析失败:", e);
+    } finally {
+      this.isAnalyzing = false;
     }
   }
 
-  private parseSuggestions(data: any): Suggestion[] {
-    const suggestions: Suggestion[] = [];
+  private convertSuggestions(items: FinalSuggestion[]): Suggestion[] {
+    return items
+      .filter((s) => (s.confidence || 1) >= this.settings.minConfidence)
+      .map((s) => ({
+        id: `${s.type}-${s.title}`,
+        type: s.type as Suggestion["type"],
+        title: s.title,
+        description: s.description,
+        action: this.getSuggestionAction(s),
+      }));
+  }
 
-    const linkData = data.suggestions?.link || {};
-
-    for (const link of linkData.links || []) {
-      const confidence = link.confidence || 0;
-      if (confidence < this.settings.minConfidence) continue;
-
-      suggestions.push({
-        id: `link-${link.target}`,
-        type: "link",
-        title: `链接到 [[${link.target}]]`,
-        description: `锚点: "${link.anchor_text}" — ${link.reason}`,
-        action: () => {
-          const editor = this.app.workspace.activeEditor?.editor;
-          if (editor) {
-            const cursor = editor.getCursor();
-            editor.replaceRange(`[[${link.target}|${link.anchor_text}]]`, cursor);
-          }
-        },
-      });
+  private getSuggestionAction(s: FinalSuggestion): (() => void) | undefined {
+    if (s.type === "link") {
+      const match = s.title.match(/\[\[(.*?)\]\]/);
+      if (!match) return undefined;
+      const target = match[1];
+      return () => {
+        const editor = this.app.workspace.activeEditor?.editor;
+        if (editor) {
+          const cursor = editor.getCursor();
+          editor.replaceRange(`[[${target}]]`, cursor);
+        }
+      };
     }
-
-    for (const orphan of linkData.orphans || []) {
-      suggestions.push({
-        id: `orphan-${orphan.note_id}`,
-        type: "orphan",
-        title: `孤岛笔记提醒: ${orphan.note_id}`,
-        description: `${orphan.reason} — 建议链接到: ${orphan.suggested_link}`,
-      });
-    }
-
-    const structData = data.suggestions?.structure || {};
-
-    if (structData.split_suggestion?.needs_split) {
-      suggestions.push({
-        id: "split",
-        type: "structure",
-        title: "建议拆分笔记",
-        description: `${structData.split_suggestion.reason} — 主题: ${(structData.split_suggestion.suggested_topics || []).join(", ")}`,
-      });
-    }
-
-    if (structData.merge_suggestion?.needs_merge) {
-      suggestions.push({
-        id: "merge",
-        type: "structure",
-        title: "建议合并笔记",
-        description: `${structData.merge_suggestion.reason} — 候选: ${(structData.merge_suggestion.candidates || []).join(", ")}`,
-      });
-    }
-
-    for (const tagSugg of structData.tag_suggestions || []) {
-      suggestions.push({
-        id: `tag-${tagSugg.current}`,
-        type: "tag",
-        title: `标签归一化: #${tagSugg.current} → #${tagSugg.suggested}`,
-        description: tagSugg.reason,
-        action: () => {
-          const editor = this.app.workspace.activeEditor?.editor;
-          if (editor) {
-            const doc = editor.getValue();
-            const updated = doc.replace(
-              new RegExp(`#${tagSugg.current}\\b`, "g"),
-              `#${tagSugg.suggested}`
-            );
-            editor.setValue(updated);
-          }
-        },
-      });
-    }
-
-    if (structData.moc_suggestion?.needs_moc) {
-      suggestions.push({
-        id: "moc",
-        type: "moc",
-        title: `建议创建 MOC: ${structData.moc_suggestion.topic}`,
-        description: structData.moc_suggestion.reason,
-      });
-    }
-
-    return suggestions;
+    return undefined;
   }
 
   private extractTags(content: string): string[] {
@@ -213,20 +217,16 @@ export default class AgentKBPlugin extends Plugin {
     return [...new Set(matches.map((m) => m.slice(1).toLowerCase()))];
   }
 
+  private async calculateHash(content: string): Promise<string> {
+    const encoder = new TextEncoder();
+    const data = encoder.encode(content);
+    const hashBuffer = await crypto.subtle.digest("SHA-256", data);
+    const hashArray = Array.from(new Uint8Array(hashBuffer));
+    return hashArray.map((b) => b.toString(16).padStart(2, "0")).join("");
+  }
+
   async sendFeedback(actionType: string, suggestion: string, accepted: boolean) {
-    try {
-      await fetch(`${this.settings.agentUrl}/api/feedback`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          action_type: actionType,
-          suggestion: suggestion,
-          accepted: accepted,
-        }),
-      });
-    } catch (e) {
-      // Silent
-    }
+    this.orchestrator?.recordFeedback(actionType, suggestion, accepted);
   }
 
   async loadSettings() {
@@ -235,6 +235,9 @@ export default class AgentKBPlugin extends Plugin {
 
   async saveSettings() {
     await this.saveData(this.settings);
+    // 更新运行时组件
+    initClient(this.settings);
+    this.orchestrator?.updateSettings(this.settings);
   }
 }
 
@@ -251,17 +254,52 @@ class AgentKBSettingTab extends PluginSettingTab {
     containerEl.empty();
     containerEl.createEl("h3", { text: "Agent KB 设置" });
 
+    // ── API 配置 ──
+    containerEl.createEl("h4", { text: "API 配置" });
+
     new Setting(containerEl)
-      .setName("Agent 服务地址")
-      .setDesc("本地 Agent 服务的 HTTP 地址")
+      .setName("DeepSeek API Key")
+      .setDesc("在 platform.deepseek.com 获取")
+      .addText((text) => {
+        text.inputEl.type = "password";
+        text.inputEl.style.width = "300px";
+        text
+          .setPlaceholder("sk-...")
+          .setValue(this.plugin.settings.deepseekApiKey)
+          .onChange(async (value) => {
+            this.plugin.settings.deepseekApiKey = value;
+            await this.plugin.saveSettings();
+          });
+      });
+
+    new Setting(containerEl)
+      .setName("API 地址")
+      .setDesc("DeepSeek API 的 base URL")
       .addText((text) =>
         text
-          .setValue(this.plugin.settings.agentUrl)
+          .setValue(this.plugin.settings.deepseekBaseUrl)
           .onChange(async (value) => {
-            this.plugin.settings.agentUrl = value;
+            this.plugin.settings.deepseekBaseUrl = value;
             await this.plugin.saveSettings();
           })
       );
+
+    new Setting(containerEl)
+      .setName("模型")
+      .setDesc("使用的模型名称")
+      .addDropdown((dropdown) =>
+        dropdown
+          .addOption("deepseek-v4-flash", "deepseek-v4-flash (推荐，便宜)")
+          .addOption("deepseek-chat", "deepseek-chat (更强，更贵)")
+          .setValue(this.plugin.settings.deepseekModel)
+          .onChange(async (value) => {
+            this.plugin.settings.deepseekModel = value;
+            await this.plugin.saveSettings();
+          })
+      );
+
+    // ── 分析行为 ──
+    containerEl.createEl("h4", { text: "分析行为" });
 
     new Setting(containerEl)
       .setName("保存时自动分析")
@@ -287,6 +325,52 @@ class AgentKBSettingTab extends PluginSettingTab {
             await this.plugin.saveSettings();
           })
           .setDynamicTooltip()
+      );
+
+    new Setting(containerEl)
+      .setName("防抖间隔")
+      .setDesc("保存后等待多久再触发分析（毫秒）")
+      .addSlider((slider) =>
+        slider
+          .setLimits(500, 5000, 100)
+          .setValue(this.plugin.settings.debounceMs)
+          .onChange(async (value) => {
+            this.plugin.settings.debounceMs = value;
+            await this.plugin.saveSettings();
+          })
+          .setDynamicTooltip()
+      );
+
+    // ── LLM 参数 ──
+    containerEl.createEl("h4", { text: "LLM 参数" });
+
+    new Setting(containerEl)
+      .setName("温度")
+      .setDesc("越低越确定，越高越有创意 (0-1)")
+      .addSlider((slider) =>
+        slider
+          .setLimits(0, 1, 0.05)
+          .setValue(this.plugin.settings.agentTemperature)
+          .onChange(async (value) => {
+            this.plugin.settings.agentTemperature = value;
+            await this.plugin.saveSettings();
+          })
+          .setDynamicTooltip()
+      );
+
+    new Setting(containerEl)
+      .setName("最大 Token")
+      .setDesc("单次 LLM 调用的最大输出 Token 数")
+      .addText((text) =>
+        text
+          .setValue(String(this.plugin.settings.agentMaxTokens))
+          .onChange(async (value) => {
+            const num = parseInt(value);
+            if (!isNaN(num) && num > 0) {
+              this.plugin.settings.agentMaxTokens = num;
+              await this.plugin.saveSettings();
+            }
+          })
       );
   }
 }

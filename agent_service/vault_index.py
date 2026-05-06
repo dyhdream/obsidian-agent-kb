@@ -8,6 +8,7 @@ import os
 import sqlite3
 import yaml
 import re
+import time
 from .config import settings
 
 
@@ -17,6 +18,9 @@ class VaultIndex:
         self.db_path = os.path.join(settings.data_db_path, "vault_index.db")
         os.makedirs(settings.data_db_path, exist_ok=True)
         self._init_db()
+        self._last_sync = 0.0
+        self._sync_throttle = settings.vault_sync_throttle
+        self._needs_sync = True
         # 只在首次（表空）时全量同步，之后的增量由 scan_vault 触发
         if self._is_empty():
             self._sync()
@@ -56,6 +60,11 @@ class VaultIndex:
         if not self.vault or not os.path.isdir(self.vault):
             return
 
+        now = time.time()
+        if not self._needs_sync and (now - self._last_sync) < self._sync_throttle:
+            return
+        self._needs_sync = False
+
         known = self._get_known_paths()
 
         for root, dirs, files in os.walk(self.vault):
@@ -83,6 +92,7 @@ class VaultIndex:
         for removed_path in known:
             self._delete(removed_path)
 
+        self._last_sync = time.time()
         self._on_change()
 
     def _on_change(self):

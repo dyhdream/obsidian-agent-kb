@@ -31,6 +31,11 @@ class Settings(BaseSettings):
     vault_mtime_tolerance: float = 0.5  # 修改时间容差(秒)
     frontmatter_parse_lines: int = 30  # 前端解析行数
 
+    # 节流 & 去重
+    vault_sync_throttle: float = 5.0       # Vault 同步最小间隔(秒)
+    analysis_dedup_ttl: int = 30           # 同文件同内容去重窗口(秒)
+    sqlite_wal_mode: bool = True           # 启用 WAL 模式
+
     log_level: str = "INFO"
     reload: bool = False
 

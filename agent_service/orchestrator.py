@@ -7,6 +7,7 @@
 
 import time
 import asyncio
+import hashlib
 from .blackboard import Blackboard
 from .agents.context_scout import ContextScout
 from .agents.link_weaver import LinkWeaver
@@ -19,10 +20,8 @@ from .config import settings
 
 # 全局结果存储
 result_store: dict[str, dict] = {}
+_analysis_cache: dict[str, dict] = {}
 _last_cleanup = 0
-
-# 全局结果存储: session_id → {status, phase, results, ...}
-result_store: dict[str, dict] = {}
 
 def _cleanup_stale_store():
     global _last_cleanup
@@ -37,31 +36,32 @@ def _cleanup_stale_store():
 
 
 class Orchestrator:
-    async def analyze(self, file_path: str, content: str, tags: list[str] = None, session_id: str = "") -> dict:
-        """同步版（向后兼容），返回完整结果。"""
-        tags = tags or []
-        sid = session_id or str(int(time.time() * 1000))
-
-        bb = Blackboard()
-        bb.clear_session()
-        ContextScout.scan_vault(file_path, content, tags, bb)
-
-        try:
-            await ContextScout(bb).run()
-        except Exception:
-            pass
-
-        link_result = await LinkWeaver(bb).run()
-        structure_result = await StructureGuardian(bb).run()
-        review_result = await Reviewer(bb).run()
-
-        return self._build_response(sid, file_path, bb, link_result, structure_result, review_result)
+    def _is_duplicate(self, file_path: str, content: str) -> str | None:
+        """检查 30s 内是否有相同文件+内容的分析。返回已有 session_id 或 None"""
+        global _analysis_cache
+        content_hash = hashlib.md5(content.encode()).hexdigest()
+        entry = _analysis_cache.get(file_path)
+        if entry:
+            if time.time() - entry["time"] < settings.analysis_dedup_ttl and entry["hash"] == content_hash:
+                return entry["sid"]  # 返回已有 session_id，复用结果
+        return None
 
     def start_analyze(self, file_path: str, content: str, tags: list[str] = None) -> str:
+        global _analysis_cache
         _cleanup_stale_store()
+
+        existing_sid = self._is_duplicate(file_path, content)
+        if existing_sid and existing_sid in result_store:
+            return existing_sid
 
         sid = str(int(time.time() * 1000))
         tags = tags or []
+        
+        _analysis_cache[file_path] = {
+            "hash": hashlib.md5(content.encode()).hexdigest(),
+            "sid": sid,
+            "time": time.time()
+        }
 
         result_store[sid] = {
             "status": "running",
