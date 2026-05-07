@@ -676,12 +676,29 @@ class BatchReportModal extends Modal {
       const acceptAllBtn = headerRow.createSpan({ cls: "agent-kb-btn-accept" });
       acceptAllBtn.setText("全部采纳");
       acceptAllBtn.addEventListener("click", async () => {
+        acceptAllBtn.setText("处理中...");
+        acceptAllBtn.style.pointerEvents = "none";
         let added = 0;
-        for (const conn of this.connections) {
-          const ok = await this.addLink(conn.source, conn.target);
-          if (ok) added++;
+        let skipped = 0;
+        const errors: string[] = [];
+        for (let i = 0; i < this.connections.length; i++) {
+          const conn = this.connections[i];
+          try {
+            const result = await this.addLink(conn.source, conn.target);
+            if (result.ok) {
+              added++;
+            } else {
+              skipped++;
+              if (result.reason) errors.push(result.reason);
+            }
+          } catch (e) {
+            skipped++;
+            errors.push(String(e));
+          }
         }
-        new Notice(`Agent KB: 已添加 ${added} 条链接`, 3000);
+        new Notice(`Agent KB: 已添加 ${added} 条链接，跳过 ${skipped} 条`, 5000);
+        if (errors.length > 0) console.error("链接添加错误:", errors.slice(0, 10));
+        acceptAllBtn.setText("✓ 已完成");
       });
 
       for (const conn of this.connections.slice(0, 30)) {
@@ -701,10 +718,16 @@ class BatchReportModal extends Modal {
         const addBtn = actions.createSpan({ cls: "agent-kb-btn-accept" });
         addBtn.setText("✓ 添加链接");
         addBtn.addEventListener("click", async () => {
-          const ok = await this.addLink(conn.source, conn.target);
-          if (ok) {
-            new Notice(`已添加: ${sourceName} → [[${targetName}]]`, 3000);
-            item.hide();
+          try {
+            const result = await this.addLink(conn.source, conn.target);
+            if (result.ok) {
+              new Notice(`已添加: ${sourceName} → [[${targetName}]]`, 3000);
+              item.hide();
+            } else {
+              new Notice(`跳过: ${result.reason}`, 3000);
+            }
+          } catch (e) {
+            new Notice(`添加失败: ${e}`, 3000);
           }
         });
       }
@@ -743,13 +766,28 @@ class BatchReportModal extends Modal {
         const moveBtn = actions.createSpan({ cls: "agent-kb-btn-accept" });
         moveBtn.setText(`移动 ${folder.notes.length} 篇`);
         moveBtn.addEventListener("click", async () => {
+          moveBtn.setText("移动中...");
+          moveBtn.style.pointerEvents = "none";
           let moved = 0;
+          let skipped = 0;
+          const errors: string[] = [];
           for (const note of folder.notes) {
-            const ok = await this.moveToFolder(note.path, folder.suggestedFolder);
-            if (ok) moved++;
+            try {
+              const result = await this.moveToFolder(note.path, folder.suggestedFolder);
+              if (result.ok) {
+                moved++;
+              } else {
+                skipped++;
+                if (result.reason) errors.push(`${note.title}: ${result.reason}`);
+              }
+            } catch (e) {
+              skipped++;
+              errors.push(`${note.title}: ${e}`);
+            }
           }
-          new Notice(`Agent KB: 已移动 ${moved} 篇到 ${folder.suggestedFolder}/`, 3000);
-          item.hide();
+          new Notice(`Agent KB: 已移动 ${moved} 篇到 ${folder.suggestedFolder}/，跳过 ${skipped} 篇`, 5000);
+          if (errors.length > 0) console.error("移动错误:", errors.slice(0, 10));
+          moveBtn.setText(`✓ 完成 (${moved})`);
         });
       }
     }
@@ -787,54 +825,48 @@ class BatchReportModal extends Modal {
   /**
    * 在源笔记末尾追加指向目标笔记的链接
    */
-  private async addLink(sourcePath: string, targetPath: string): Promise<boolean> {
-    try {
-      const file = this.app.vault.getAbstractFileByPath(sourcePath);
-      if (!(file instanceof TFile)) return false;
-
-      const content = await this.app.vault.read(file);
-      const targetName = targetPath.replace(/\.md$/, "");
-
-      // 已经有这个链接就不重复添加
-      if (content.includes(`[[${targetName}]]`) || content.includes(`[[${targetName}|`)) {
-        return false;
-      }
-
-      // 追加到文件末尾（换行 + 链接）
-      const newContent = content.trimEnd() + `\n\n[[${targetName}]]\n`;
-      await this.app.vault.modify(file, newContent);
-      return true;
-    } catch {
-      return false;
+  private async addLink(sourcePath: string, targetPath: string): Promise<{ ok: boolean; reason?: string }> {
+    const file = this.app.vault.getAbstractFileByPath(sourcePath);
+    if (!(file instanceof TFile)) {
+      return { ok: false, reason: `文件不存在: ${sourcePath}` };
     }
+
+    const content = await this.app.vault.read(file);
+    const targetName = targetPath.replace(/\.md$/, "");
+
+    if (content.includes(`[[${targetName}]]`) || content.includes(`[[${targetName}|`)) {
+      return { ok: false, reason: "链接已存在" };
+    }
+
+    const newContent = content.trimEnd() + `\n\n[[${targetName}]]\n`;
+    await this.app.vault.modify(file, newContent);
+    return { ok: true };
   }
 
   /**
    * 移动笔记到目标文件夹
    */
-  private async moveToFolder(notePath: string, folder: string): Promise<boolean> {
-    try {
-      const file = this.app.vault.getAbstractFileByPath(notePath);
-      if (!(file instanceof TFile)) return false;
-
-      // 确保目标文件夹存在
-      const folderPath = folder.endsWith("/") ? folder : folder + "/";
-      const existingFolder = this.app.vault.getAbstractFileByPath(folderPath);
-      if (!existingFolder) {
-        await this.app.vault.createFolder(folderPath);
-      }
-
-      const fileName = notePath.split("/").pop() || notePath;
-      const newPath = folderPath + fileName;
-
-      // 目标路径已存在则跳过
-      if (this.app.vault.getAbstractFileByPath(newPath)) return false;
-
-      await this.app.vault.rename(file, newPath);
-      return true;
-    } catch {
-      return false;
+  private async moveToFolder(notePath: string, folder: string): Promise<{ ok: boolean; reason?: string }> {
+    const file = this.app.vault.getAbstractFileByPath(notePath);
+    if (!(file instanceof TFile)) {
+      return { ok: false, reason: `文件不存在: ${notePath}` };
     }
+
+    const folderPath = folder.endsWith("/") ? folder : folder + "/";
+    const existingFolder = this.app.vault.getAbstractFileByPath(folderPath);
+    if (!existingFolder) {
+      await this.app.vault.createFolder(folderPath);
+    }
+
+    const fileName = notePath.split("/").pop() || notePath;
+    const newPath = folderPath + fileName;
+
+    if (this.app.vault.getAbstractFileByPath(newPath)) {
+      return { ok: false, reason: `目标已存在: ${newPath}` };
+    }
+
+    await this.app.vault.rename(file, newPath);
+    return { ok: true };
   }
 
   onClose() {
