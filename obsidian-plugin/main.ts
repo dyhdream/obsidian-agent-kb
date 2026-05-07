@@ -227,24 +227,43 @@ export default class AgentKBPlugin extends Plugin {
       const match = s.title.match(/\[\[(.*?)\]\]/);
       if (!match) return undefined;
       const target = match[1];
+
+      // 从 description 中提取锚点文本: 锚点: "XXX" — reason
+      const anchorMatch = s.description.match(/锚点:\s*"([^"]+)"/);
+      const anchorText = anchorMatch ? anchorMatch[1] : "";
+
       return () => {
         const editor = this.app.workspace.activeEditor?.editor;
-        if (editor) {
-          const cursor = editor.getCursor();
-          editor.replaceRange(`[[${target}]]`, cursor);
+        if (!editor) return;
+
+        // 优先：在正文中查找锚点文本并替换为链接
+        if (anchorText) {
+          const content = editor.getValue();
+          const idx = content.indexOf(anchorText);
+          if (idx !== -1) {
+            const from = editor.offsetToPos(idx);
+            const to = editor.offsetToPos(idx + anchorText.length);
+            const linkText = anchorText === target
+              ? `[[${target}]]`
+              : `[[${target}|${anchorText}]]`;
+            editor.replaceRange(linkText, from, to);
+            return;
+          }
         }
+
+        // 兜底：锚点文本未找到，在光标处插入
+        const cursor = editor.getCursor();
+        editor.replaceRange(`[[${target}]]`, cursor);
       };
     }
 
     if (s.type === "concept") {
-      // 从 "可新建: XXX" 中提取概念名
       const conceptName = s.title.replace(/^可新建:\s*/, "").trim();
       if (!conceptName) return undefined;
       return () => this.createNoteAndOpen(conceptName, "concept");
     }
 
     if (s.type === "moc") {
-      // 从 "建议创建 MOC: XXX" 中提取主题名
       const topic = s.title.replace(/^建议创建\s*MOC:\s*/, "").trim();
       if (!topic) return undefined;
       return () => this.createNoteAndOpen(`${topic} MOC`, "moc", topic);
