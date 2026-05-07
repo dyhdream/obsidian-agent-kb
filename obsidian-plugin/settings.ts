@@ -6,6 +6,7 @@ export interface AgentKBSettings {
 
   // 分析行为
   autoAnalyzeOnSave: boolean;
+  autoGenerateConceptContent: boolean;
   minConfidence: number;
   debounceMs: number;
 
@@ -21,6 +22,7 @@ export const DEFAULT_SETTINGS: AgentKBSettings = {
   deepseekModel: "deepseek-v4-flash",
 
   autoAnalyzeOnSave: true,
+  autoGenerateConceptContent: true,
   minConfidence: 0.3,
   debounceMs: 2000,
 

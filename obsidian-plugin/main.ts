@@ -8,10 +8,11 @@ import {
   TFile,
 } from "obsidian";
 import { AgentKBSettings, DEFAULT_SETTINGS } from "./settings";
-import { initClient } from "./src/deepseek_client";
+import { initClient, getClient } from "./src/deepseek_client";
 import { Orchestrator, AnalysisCallbacks } from "./src/orchestrator";
 import { PreferenceLearner } from "./src/preference_learner";
 import { FinalSuggestion } from "./src/blackboard";
+import { parseJson } from "./src/utils";
 
 interface Suggestion {
   id: string;
@@ -33,6 +34,7 @@ class SuggestionModal extends Modal {
   }
 
   onOpen() {
+    this.plugin.setModalOpen(true);
     const { contentEl } = this;
     contentEl.addClass("agent-kb-modal");
 
@@ -63,7 +65,7 @@ class SuggestionModal extends Modal {
       const acceptBtn = actions.createSpan({ cls: "agent-kb-btn-accept" });
       acceptBtn.setText("✓");
       acceptBtn.addEventListener("click", async () => {
-        s.action?.();
+        if (s.action) await s.action();
         await this.plugin.sendFeedback(s.type, s.title, true);
         section.hide();
         this.checkAllProcessed();
@@ -80,15 +82,17 @@ class SuggestionModal extends Modal {
   }
 
   private checkAllProcessed() {
-    const allHidden = this.itemSections.every((el) => el.style.display === "none" || el.isHidden());
+    const allHidden = this.itemSections.every(
+      (el) => el.style.display === "none" || el.isHidden()
+    );
     if (allHidden) {
       this.close();
     }
   }
 
   onClose() {
-    const { contentEl } = this;
-    contentEl.empty();
+    this.plugin.setModalOpen(false);
+    this.contentEl.empty();
   }
 }
 
@@ -98,16 +102,18 @@ export default class AgentKBPlugin extends Plugin {
   private preferenceLearner: PreferenceLearner | null = null;
   private debounceTimer: number | null = null;
   private isAnalyzing = false;
-  private analysisCooldownUntil = 0;
+  private modalOpen = false;
   private lastAnalyzed: Map<string, { hash: string; time: number }> = new Map();
+
+  /** 供 SuggestionModal 调用，标记弹窗状态 */
+  setModalOpen(open: boolean): void {
+    this.modalOpen = open;
+  }
 
   async onload() {
     await this.loadSettings();
-
-    // 初始化 DeepSeek 客户端
     initClient(this.settings);
 
-    // 初始化偏好学习器（持久化到 Obsidian data）
     const savedPrefs = (await this.loadData())?.preferences || {};
     this.preferenceLearner = new PreferenceLearner(
       (data) => {
@@ -116,13 +122,8 @@ export default class AgentKBPlugin extends Plugin {
       savedPrefs
     );
 
-    // 初始化编排器
     this.orchestrator = new Orchestrator(this.settings, this.preferenceLearner);
-
-    // 注册保存事件
     this.app.vault.on("modify", this.onFileSave.bind(this));
-
-    // 注册设置面板
     this.addSettingTab(new AgentKBSettingTab(this.app, this));
   }
 
@@ -131,16 +132,13 @@ export default class AgentKBPlugin extends Plugin {
     if (!(file instanceof TFile)) return;
     if (file.extension !== "md") return;
     if (this.isAnalyzing) return;
+    // 弹窗打开期间禁止新分析（防止连锁触发）
+    if (this.modalOpen) return;
 
-    // 冷却期内跳过（防止插件自身修改文件触发重复分析）
-    if (Date.now() < this.analysisCooldownUntil) return;
-
-    // 清除之前的防抖定时器
     if (this.debounceTimer) {
       clearTimeout(this.debounceTimer);
     }
 
-    // 设置新的防抖定时器
     this.debounceTimer = window.setTimeout(
       () => this.doAnalyze(file),
       this.settings.debounceMs
@@ -156,7 +154,6 @@ export default class AgentKBPlugin extends Plugin {
       const tags = this.extractTags(content);
       const contentHash = await this.calculateHash(content);
 
-      // 检查是否已分析过（30 秒内同内容跳过）
       const last = this.lastAnalyzed.get(file.path);
       if (last && last.hash === contentHash && Date.now() - last.time < 30000) {
         return;
@@ -164,7 +161,6 @@ export default class AgentKBPlugin extends Plugin {
 
       this.lastAnalyzed.set(file.path, { hash: contentHash, time: Date.now() });
 
-      // 显示进度提示
       const notice = new Notice("Agent KB 分析中...", 0);
       let modal: SuggestionModal | null = null;
 
@@ -205,8 +201,6 @@ export default class AgentKBPlugin extends Plugin {
       console.error("Agent KB 分析失败:", e);
     } finally {
       this.isAnalyzing = false;
-      // 冷却期：分析完成后 10 秒内不触发新分析
-      this.analysisCooldownUntil = Date.now() + 10000;
     }
   }
 
@@ -222,17 +216,20 @@ export default class AgentKBPlugin extends Plugin {
       }));
   }
 
-  private getSuggestionAction(s: FinalSuggestion): (() => void) | undefined {
+  // ──────────────────────────────────────────
+  // 建议动作：链接插入 / 创建笔记
+  // ──────────────────────────────────────────
+
+  private getSuggestionAction(s: FinalSuggestion): (() => Promise<void>) | undefined {
     if (s.type === "link") {
       const match = s.title.match(/\[\[(.*?)\]\]/);
       if (!match) return undefined;
       const target = match[1];
 
-      // 从 description 中提取锚点文本: 锚点: "XXX" — reason
       const anchorMatch = s.description.match(/锚点:\s*"([^"]+)"/);
       const anchorText = anchorMatch ? anchorMatch[1] : "";
 
-      return () => {
+      return async () => {
         const editor = this.app.workspace.activeEditor?.editor;
         if (!editor) return;
 
@@ -243,62 +240,105 @@ export default class AgentKBPlugin extends Plugin {
           if (idx !== -1) {
             const from = editor.offsetToPos(idx);
             const to = editor.offsetToPos(idx + anchorText.length);
-            const linkText = anchorText === target
-              ? `[[${target}]]`
-              : `[[${target}|${anchorText}]]`;
+            const linkText =
+              anchorText === target
+                ? `[[${target}]]`
+                : `[[${target}|${anchorText}]]`;
             editor.replaceRange(linkText, from, to);
             return;
           }
         }
 
-        // 兜底：锚点文本未找到，在光标处插入
-        const cursor = editor.getCursor();
-        editor.replaceRange(`[[${target}]]`, cursor);
+        // 兜底：锚点未找到，在当前段落末尾追加（不影响阅读）
+        this.appendLinkAtParagraphEnd(editor, target);
       };
     }
 
     if (s.type === "concept") {
       const conceptName = s.title.replace(/^可新建:\s*/, "").trim();
       if (!conceptName) return undefined;
-      return () => this.createNoteAndOpen(conceptName, "concept");
+      return async () => this.createNoteAndOpen(conceptName, "concept");
     }
 
     if (s.type === "moc") {
       const topic = s.title.replace(/^建议创建\s*MOC:\s*/, "").trim();
       if (!topic) return undefined;
-      return () => this.createNoteAndOpen(`${topic} MOC`, "moc", topic);
+      return async () => this.createNoteAndOpen(`${topic} MOC`, "moc", topic);
     }
 
     return undefined;
   }
 
   /**
-   * 创建新笔记并打开
+   * 在当前段落末尾追加链接（不打断用户阅读）
+   * 找到光标所在行的内容末尾，追加 ` [[target]]`
    */
-  private async createNoteAndOpen(title: string, type: "concept" | "moc", topic?: string): Promise<void> {
-    const today = new Date().toISOString().slice(0, 10);
-    const tags = type === "moc" ? ["moc"] : [];
+  private appendLinkAtParagraphEnd(editor: any, target: string): void {
+    const cursor = editor.getCursor();
+    const line = editor.getLine(cursor.line);
 
-    let content = "---\n";
-    content += `created: ${today}\n`;
-    if (tags.length > 0) {
-      content += `tags: [${tags.join(", ")}]\n`;
+    // 找到当前段落的最后一行（连续非空行的末尾）
+    let endLine = cursor.line;
+    for (let i = cursor.line + 1; i < editor.lineCount(); i++) {
+      if (editor.getLine(i).trim() === "") break;
+      endLine = i;
     }
-    content += "---\n\n";
+
+    const endContent = editor.getLine(endLine);
+    const insertPos = { line: endLine, ch: endContent.length };
+    editor.replaceRange(` [[${target}]]`, insertPos);
+  }
+
+  // ──────────────────────────────────────────
+  // 创建新笔记（支持 AI 生成内容）
+  // ──────────────────────────────────────────
+
+  private async createNoteAndOpen(
+    title: string,
+    type: "concept" | "moc",
+    topic?: string
+  ): Promise<void> {
+    const today = new Date().toISOString().slice(0, 10);
+    let content: string;
 
     if (type === "moc" && topic) {
-      content += `## ${title}\n\n`;
-      content += `> [!note] MOC（Map of Content）\n> ${topic} 相关笔记的导航页。\n\n`;
-      content += `### 相关笔记\n\n`;
-      content += `<!-- 在此添加相关笔记的链接 -->\n`;
+      // MOC 笔记：固定模板
+      content = [
+        "---",
+        `created: ${today}`,
+        "tags: [moc]",
+        "---",
+        "",
+        `## ${title}`,
+        "",
+        `> [!note] MOC（Map of Content）`,
+        `> ${topic} 相关笔记的导航页。`,
+        "",
+        "### 相关笔记",
+        "",
+        "<!-- 在此添加相关笔记的 [[链接]] -->",
+        "",
+      ].join("\n");
+    } else if (this.settings.autoGenerateConceptContent) {
+      // concept 笔记：AI 生成内容
+      content = await this.generateConceptContent(title, today);
     } else {
-      content += `## ${title}\n\n`;
-      content += `<!-- 在此开始写作 -->\n`;
+      // concept 笔记：空白模板
+      content = [
+        "---",
+        `created: ${today}`,
+        `tags: [${title.toLowerCase().replace(/\s+/g, "-")}]`,
+        "---",
+        "",
+        `## ${title}`,
+        "",
+        "<!-- 在此开始写作 -->",
+        "",
+      ].join("\n");
     }
 
     const fileName = `${title}.md`;
 
-    // 检查是否已存在
     const existing = this.app.vault.getAbstractFileByPath(fileName);
     if (existing) {
       new Notice(`笔记 "${fileName}" 已存在`);
@@ -312,6 +352,69 @@ export default class AgentKBPlugin extends Plugin {
     await leaf.openFile(file);
     new Notice(`已创建笔记: ${title}`);
   }
+
+  /**
+   * 调用 DeepSeek 生成新概念笔记内容（严格 Obsidian 格式）
+   */
+  private async generateConceptContent(
+    conceptName: string,
+    date: string
+  ): Promise<string> {
+    try {
+      const raw = await getClient().chat(
+        [
+          {
+            role: "system",
+            content: `你是一个 Obsidian 知识库写作专家。根据给定的概念名，生成一篇简洁的笔记。
+
+## 强制格式规范
+1. YAML frontmatter 放在文件最顶部（--- 包裹）
+2. frontmatter 必须包含 created 和 tags 字段
+3. 内容从 ## 开始（文件名即一级标题）
+4. 内部链接使用 [[笔记标题]] 格式
+5. 不要使用外部链接 [text](url)
+6. 要点使用列表，关键概念加粗
+7. 内容简洁，150-300 字即可
+8. 不要输出 JSON 以外的任何说明文字`,
+          },
+          {
+            role: "user",
+            content: `为概念 "${conceptName}" 生成一篇 Obsidian 笔记。日期: ${date}
+
+严格按以下 JSON 输出：
+{
+  "content": "完整的 Obsidian 格式笔记内容（含 YAML frontmatter）"
+}`,
+          },
+        ],
+        { temperature: 0.4, maxTokens: 800 }
+      );
+
+      const parsed = parseJson(raw);
+      if (parsed.content && typeof parsed.content === "string") {
+        return parsed.content;
+      }
+    } catch (e) {
+      console.error("AI 生成笔记内容失败:", e);
+    }
+
+    // 兜底：AI 失败时返回基本模板
+    return [
+      "---",
+      `created: ${date}`,
+      `tags: [${conceptName.toLowerCase().replace(/\s+/g, "-")}]`,
+      "---",
+      "",
+      `## ${conceptName}`,
+      "",
+      "<!-- AI 生成失败，在此开始写作 -->",
+      "",
+    ].join("\n");
+  }
+
+  // ──────────────────────────────────────────
+  // 工具方法
+  // ──────────────────────────────────────────
 
   private extractTags(content: string): string[] {
     const regex = /#([a-zA-Z\u4e00-\u9fa5][a-zA-Z0-9\u4e00-\u9fa5_-]*)/g;
@@ -342,6 +445,10 @@ export default class AgentKBPlugin extends Plugin {
     this.orchestrator?.updateSettings(this.settings);
   }
 }
+
+// ──────────────────────────────────────────
+// 设置面板
+// ──────────────────────────────────────────
 
 class AgentKBSettingTab extends PluginSettingTab {
   plugin: AgentKBPlugin;
@@ -411,6 +518,18 @@ class AgentKBSettingTab extends PluginSettingTab {
           .setValue(this.plugin.settings.autoAnalyzeOnSave)
           .onChange(async (value) => {
             this.plugin.settings.autoAnalyzeOnSave = value;
+            await this.plugin.saveSettings();
+          })
+      );
+
+    new Setting(containerEl)
+      .setName("AI 自动生成新笔记内容")
+      .setDesc("接受「可新建」建议时，用 AI 自动生成笔记初稿（关闭则创建空白笔记）")
+      .addToggle((toggle) =>
+        toggle
+          .setValue(this.plugin.settings.autoGenerateConceptContent)
+          .onChange(async (value) => {
+            this.plugin.settings.autoGenerateConceptContent = value;
             await this.plugin.saveSettings();
           })
       );
