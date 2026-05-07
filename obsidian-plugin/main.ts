@@ -24,6 +24,7 @@ interface Suggestion {
 class SuggestionModal extends Modal {
   private suggestions: Suggestion[];
   private plugin: AgentKBPlugin;
+  private itemSections: HTMLElement[] = [];
 
   constructor(app: App, plugin: AgentKBPlugin, suggestions: Suggestion[]) {
     super(app);
@@ -43,6 +44,7 @@ class SuggestionModal extends Modal {
 
     for (const s of this.suggestions) {
       const section = contentEl.createDiv({ cls: "agent-kb-item" });
+      this.itemSections.push(section);
 
       const itemContent = section.createDiv({ cls: "agent-kb-item-content" });
 
@@ -64,6 +66,7 @@ class SuggestionModal extends Modal {
         s.action?.();
         await this.plugin.sendFeedback(s.type, s.title, true);
         section.hide();
+        this.checkAllProcessed();
       });
 
       const rejectBtn = actions.createSpan({ cls: "agent-kb-btn-reject" });
@@ -71,7 +74,15 @@ class SuggestionModal extends Modal {
       rejectBtn.addEventListener("click", async () => {
         await this.plugin.sendFeedback(s.type, s.title, false);
         section.hide();
+        this.checkAllProcessed();
       });
+    }
+  }
+
+  private checkAllProcessed() {
+    const allHidden = this.itemSections.every((el) => el.style.display === "none" || el.isHidden());
+    if (allHidden) {
+      this.close();
     }
   }
 
@@ -87,6 +98,7 @@ export default class AgentKBPlugin extends Plugin {
   private preferenceLearner: PreferenceLearner | null = null;
   private debounceTimer: number | null = null;
   private isAnalyzing = false;
+  private analysisCooldownUntil = 0;
   private lastAnalyzed: Map<string, { hash: string; time: number }> = new Map();
 
   async onload() {
@@ -120,6 +132,9 @@ export default class AgentKBPlugin extends Plugin {
     if (file.extension !== "md") return;
     if (this.isAnalyzing) return;
 
+    // 冷却期内跳过（防止插件自身修改文件触发重复分析）
+    if (Date.now() < this.analysisCooldownUntil) return;
+
     // 清除之前的防抖定时器
     if (this.debounceTimer) {
       clearTimeout(this.debounceTimer);
@@ -151,14 +166,25 @@ export default class AgentKBPlugin extends Plugin {
 
       // 显示进度提示
       const notice = new Notice("Agent KB 分析中...", 0);
+      let modal: SuggestionModal | null = null;
 
       const callbacks: AnalysisCallbacks = {
         onPhase: (_phase, label) => {
           notice.setMessage(`Agent KB: ${label}`);
         },
+        onReviewerComplete: (refined) => {
+          if (modal && refined.length > 0) {
+            const updated = this.convertSuggestions(refined);
+            if (updated.length > 0) {
+              modal.close();
+              modal = new SuggestionModal(this.app, this, updated);
+              modal.open();
+            }
+          }
+        },
       };
 
-      const result = await this.orchestrator.analyze(
+      const phase2Suggestions = await this.orchestrator.analyze(
         this.app,
         file,
         content,
@@ -168,17 +194,19 @@ export default class AgentKBPlugin extends Plugin {
 
       notice.hide();
 
-      // 转换为插件 Suggestion 格式
-      const suggestions = this.convertSuggestions(result.suggestions);
+      const suggestions = this.convertSuggestions(phase2Suggestions);
 
       if (suggestions.length > 0) {
         new Notice(`Agent KB: 发现 ${suggestions.length} 条建议`, 5000);
-        new SuggestionModal(this.app, this, suggestions).open();
+        modal = new SuggestionModal(this.app, this, suggestions);
+        modal.open();
       }
     } catch (e) {
       console.error("Agent KB 分析失败:", e);
     } finally {
       this.isAnalyzing = false;
+      // 冷却期：分析完成后 10 秒内不触发新分析
+      this.analysisCooldownUntil = Date.now() + 10000;
     }
   }
 
@@ -235,7 +263,6 @@ export default class AgentKBPlugin extends Plugin {
 
   async saveSettings() {
     await this.saveData(this.settings);
-    // 更新运行时组件
     initClient(this.settings);
     this.orchestrator?.updateSettings(this.settings);
   }
