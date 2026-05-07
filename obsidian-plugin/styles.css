@@ -2,6 +2,16 @@
   margin-bottom: 16px;
 }
 
+.agent-kb-modal .agent-kb-section-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  font-weight: 600;
+  margin-bottom: 8px;
+  padding-bottom: 4px;
+  border-bottom: 1px solid var(--background-modifier-border);
+}
+
 .agent-kb-modal .agent-kb-section-title {
   font-weight: 600;
   margin-bottom: 8px;
