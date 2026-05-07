@@ -693,12 +693,16 @@ class BatchReportModal extends Modal {
             }
           } catch (e) {
             skipped++;
-            errors.push(String(e));
+            errors.push(`异常: ${e}`);
           }
         }
-        new Notice(`Agent KB: 已添加 ${added} 条链接，跳过 ${skipped} 条`, 5000);
-        if (errors.length > 0) console.error("链接添加错误:", errors.slice(0, 10));
-        acceptAllBtn.setText("✓ 已完成");
+        const msg = `Agent KB: 已添加 ${added} 条链接，跳过 ${skipped} 条`;
+        new Notice(msg, 5000);
+        if (errors.length > 0) {
+          console.error("链接添加详情:", errors);
+          new Notice(`错误详情 (前5条): ${errors.slice(0, 5).join("; ")}`, 8000);
+        }
+        acceptAllBtn.setText(added > 0 ? `✓ 已完成 (${added})` : "无新增");
       });
 
       for (const conn of this.connections.slice(0, 30)) {
@@ -778,16 +782,20 @@ class BatchReportModal extends Modal {
                 moved++;
               } else {
                 skipped++;
-                if (result.reason) errors.push(`${note.title}: ${result.reason}`);
+                if (result.reason) errors.push(result.reason);
               }
             } catch (e) {
               skipped++;
-              errors.push(`${note.title}: ${e}`);
+              errors.push(`异常: ${e}`);
             }
           }
-          new Notice(`Agent KB: 已移动 ${moved} 篇到 ${folder.suggestedFolder}/，跳过 ${skipped} 篇`, 5000);
-          if (errors.length > 0) console.error("移动错误:", errors.slice(0, 10));
-          moveBtn.setText(`✓ 完成 (${moved})`);
+          const msg = `Agent KB: 已移动 ${moved} 篇到 ${folder.suggestedFolder}/，跳过 ${skipped} 篇`;
+          new Notice(msg, 5000);
+          if (errors.length > 0) {
+            console.error("移动详情:", errors);
+            new Notice(`错误详情 (前5条): ${errors.slice(0, 5).join("; ")}`, 8000);
+          }
+          moveBtn.setText(moved > 0 ? `✓ 完成 (${moved})` : "无移动");
         });
       }
     }
@@ -835,7 +843,7 @@ class BatchReportModal extends Modal {
     const targetName = targetPath.replace(/\.md$/, "");
 
     if (content.includes(`[[${targetName}]]`) || content.includes(`[[${targetName}|`)) {
-      return { ok: false, reason: "链接已存在" };
+      return { ok: false, reason: `链接已存在: [[${targetName}]]` };
     }
 
     const newContent = content.trimEnd() + `\n\n[[${targetName}]]\n`;
@@ -849,18 +857,20 @@ class BatchReportModal extends Modal {
   private async moveToFolder(notePath: string, folder: string): Promise<{ ok: boolean; reason?: string }> {
     const file = this.app.vault.getAbstractFileByPath(notePath);
     if (!(file instanceof TFile)) {
-      return { ok: false, reason: `文件不存在: ${notePath}` };
+      return { ok: false, reason: `文件不存在: "${notePath}"` };
     }
 
-    const folderPath = folder.endsWith("/") ? folder : folder + "/";
+    // 确保目标文件夹存在（不带尾部斜杠）
+    const folderPath = folder.replace(/\/$/, "");
     const existingFolder = this.app.vault.getAbstractFileByPath(folderPath);
     if (!existingFolder) {
       await this.app.vault.createFolder(folderPath);
     }
 
     const fileName = notePath.split("/").pop() || notePath;
-    const newPath = folderPath + fileName;
+    const newPath = folderPath + "/" + fileName;
 
+    // 目标路径已存在则跳过
     if (this.app.vault.getAbstractFileByPath(newPath)) {
       return { ok: false, reason: `目标已存在: ${newPath}` };
     }
