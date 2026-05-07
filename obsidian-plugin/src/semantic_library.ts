@@ -36,6 +36,73 @@ const CATEGORIES = [
   "技术", "科学", "历史", "人文", "生活", "学习", "商业", "艺术", "其他",
 ];
 
+// ── 主题归一化 ──
+
+/**
+ * 归一化主题词：去除修饰语，保留核心词
+ * "Python装饰器" → "装饰器"
+ * "机器学习算法" → "机器学习"
+ * "深度学习框架" → "深度学习"
+ * "JavaScript异步编程" → "异步"
+ */
+function normalizeTopic(topic: string): string {
+  let t = topic.toLowerCase().trim();
+
+  // 去除常见前缀（编程语言名、框架名等）
+  const prefixes = [
+    "python", "javascript", "typescript", "java", "go", "rust", "c++",
+    "react", "vue", "angular", "node", "docker", "kubernetes", "k8s",
+    "redis", "mysql", "postgresql", "mongodb", "elasticsearch",
+    "tensorflow", "pytorch", "nginx", "webpack", "git",
+    "css", "html", "sql", "graphql", "rest", "oauth",
+    "机器学习", "深度学习", "人工智能", "数据科学",
+  ];
+  for (const prefix of prefixes) {
+    if (t.startsWith(prefix) && t.length > prefix.length) {
+      t = t.slice(prefix.length).trim();
+    }
+  }
+
+  // 去除常见后缀
+  const suffixes = [
+    "基础", "入门", "进阶", "高级", "原理", "实践", "技术", "方法",
+    "算法", "框架", "工具", "库", "模块", "概念", "模式", "策略",
+    "设计", "实现", "优化", "管理", "开发", "编程", "语言", "系统",
+    "对比", "简介", "概述", "详解", "指南", "教程", "思想", "理论",
+  ];
+  for (const suffix of suffixes) {
+    if (t.endsWith(suffix) && t.length > suffix.length + 1) {
+      t = t.slice(0, -suffix.length).trim();
+    }
+  }
+
+  return t;
+}
+
+/**
+ * 计算两段文本的关键词重叠度
+ */
+function countSummaryOverlap(a: string, b: string): number {
+  const extractWords = (text: string): Set<string> => {
+    const words = new Set<string>();
+    // 中文词（2-4字）
+    const cn = text.match(/[\u4e00-\u9fa5]{2,4}/g);
+    if (cn) cn.forEach((w) => words.add(w));
+    // 英文词（首字母大写或全大写）
+    const en = text.match(/\b[A-Za-z]{3,}\b/g);
+    if (en) en.forEach((w) => words.add(w.toLowerCase()));
+    return words;
+  };
+
+  const aWords = extractWords(a);
+  const bWords = extractWords(b);
+  let overlap = 0;
+  for (const w of aWords) {
+    if (bWords.has(w)) overlap++;
+  }
+  return overlap / Math.max(aWords.size, bWords.size, 1);
+}
+
 // ── 语义库类 ──
 
 export class SemanticLibrary {
@@ -235,19 +302,15 @@ ${contentSnippet}
   }
 
   /**
-   * 用 LLM 批量发现笔记间的连接
-   * 每次处理一个 batch（20 篇），返回跨笔记的链接建议
+   * 算法发现笔记间的连接（两两比较 keyTopics + category）
+   * 不依赖 LLM，速度快，跨全部笔记
    */
-  async discoverConnections(
-    batchSize: number = 20
-  ): Promise<
-    Array<{
-      source: string;
-      target: string;
-      reason: string;
-      confidence: number;
-    }>
-  > {
+  discoverConnections(): Array<{
+    source: string;
+    target: string;
+    reason: string;
+    confidence: number;
+  }> {
     const allProfiles = this.getAllProfiles();
     const connections: Array<{
       source: string;
@@ -256,68 +319,60 @@ ${contentSnippet}
       confidence: number;
     }> = [];
 
-    // 按 batch 分组
-    for (let i = 0; i < allProfiles.length; i += batchSize) {
-      const batch = allProfiles.slice(i, i + batchSize);
+    // 预处理：归一化每个 profile 的 topic 集合
+    const profileTopicSets = allProfiles.map((p) => ({
+      profile: p,
+      topics: new Set(
+        p.keyTopics.map((t) => normalizeTopic(t)).filter((t) => t.length >= 2)
+      ),
+    }));
 
-      const profilesText = batch
-        .map(
-          (p, idx) =>
-            `[${idx}] ${p.title} (${p.category}): ${p.summary} | 主题: ${p.keyTopics.join(", ")}`
-        )
-        .join("\n");
+    // 两两比较
+    for (let i = 0; i < profileTopicSets.length; i++) {
+      for (let j = i + 1; j < profileTopicSets.length; j++) {
+        const a = profileTopicSets[i];
+        const b = profileTopicSets[j];
 
-      try {
-        const raw = await getClient().chat(
-          [
-            {
-              role: "system",
-              content: `你是一个知识库连接发现专家。分析以下笔记列表，找出它们之间的关联。
-
-## 输出格式（严格 JSON 数组）
-[
-  {"from": "源笔记标题", "to": "目标笔记标题", "reason": "关联原因", "confidence": 0.0-1.0}
-]
-
-## 规则
-- 只返回 confidence >= 0.6 的强关联
-- from 和 to 必须是列表中已有的笔记标题
-- 每条连接的 from 和 to 不能相同
-- 最多返回 20 条连接
-- 只输出 JSON 数组，不要其他内容`,
-            },
-            {
-              role: "user",
-              content: `笔记列表:\n${profilesText}\n\n输出 JSON 数组。`,
-            },
-          ],
-          { temperature: 0.2, maxTokens: 1024 }
-        );
-
-        const parsed = parseJson(raw);
-        if (Array.isArray(parsed)) {
-          for (const conn of parsed) {
-            if (conn.from && conn.to && conn.confidence >= 0.6) {
-              // 找到对应的 profile path
-              const fromProfile = batch.find((p) => p.title === conn.from);
-              const toProfile = batch.find((p) => p.title === conn.to);
-              if (fromProfile && toProfile) {
-                connections.push({
-                  source: fromProfile.path,
-                  target: toProfile.path,
-                  reason: String(conn.reason || ""),
-                  confidence: Number(conn.confidence) || 0.7,
-                });
-              }
-            }
-          }
+        // 计算 topic 重叠
+        const overlap: string[] = [];
+        for (const t of a.topics) {
+          if (b.topics.has(t)) overlap.push(t);
         }
-      } catch (e) {
-        console.error("SemanticLibrary: 批量发现连接失败", e);
+
+        if (overlap.length === 0) continue;
+
+        // 计算置信度
+        const maxTopics = Math.max(a.topics.size, b.topics.size, 1);
+        let confidence = overlap.length / maxTopics;
+
+        // 同类别加分
+        if (a.profile.category === b.profile.category) {
+          confidence += 0.2;
+        }
+
+        // summary 关键词重叠加分
+        const summaryOverlap = countSummaryOverlap(
+          a.profile.summary,
+          b.profile.summary
+        );
+        confidence += summaryOverlap * 0.1;
+
+        confidence = Math.min(confidence, 1.0);
+
+        if (confidence >= 0.3) {
+          connections.push({
+            source: a.profile.path,
+            target: b.profile.path,
+            reason: `共同主题: ${overlap.join(", ")}`,
+            confidence: Math.round(confidence * 100) / 100,
+          });
+        }
       }
     }
 
-    return connections;
+    // 按置信度排序，取前 50 条
+    connections.sort((a, b) => b.confidence - a.confidence);
+    return connections.slice(0, 50);
   }
 
   /**
@@ -336,8 +391,10 @@ ${contentSnippet}
       groups.get(profile.category)!.push(profile);
     }
 
+    // 按笔记数排序，阈值降至 2 篇
     return Array.from(groups.entries())
-      .filter(([_, notes]) => notes.length >= 3) // 至少 3 篇才建议归类
+      .filter(([_, notes]) => notes.length >= 2)
+      .sort((a, b) => b[1].length - a[1].length)
       .map(([category, notes]) => ({
         category,
         notes,
@@ -347,18 +404,24 @@ ${contentSnippet}
 
   /**
    * 按主题聚类，生成 MOC 建议
+   * 使用归一化后的 keyTopics 聚合（不同措辞的同一概念会合并）
    */
   getMocSuggestions(): Array<{
     topic: string;
     notes: NoteProfile[];
     reason: string;
   }> {
-    // 按 keyTopics 聚合
     const topicMap = new Map<string, NoteProfile[]>();
+
     for (const profile of this.profiles.values()) {
+      // 用 Set 去重，避免同一篇笔记在同一 topic 下出现多次
+      const addedTopics = new Set<string>();
       for (const topic of profile.keyTopics) {
-        const normalized = topic.toLowerCase().trim();
+        const normalized = normalizeTopic(topic);
         if (normalized.length < 2) continue;
+        if (addedTopics.has(normalized)) continue;
+        addedTopics.add(normalized);
+
         if (!topicMap.has(normalized)) {
           topicMap.set(normalized, []);
         }
@@ -366,9 +429,11 @@ ${contentSnippet}
       }
     }
 
-    // 只保留有 5 篇以上笔记的主题
+    // 只保留有 3 篇以上笔记的主题（降低阈值）
     return Array.from(topicMap.entries())
-      .filter(([_, notes]) => notes.length >= 5)
+      .filter(([_, notes]) => notes.length >= 3)
+      .sort((a, b) => b[1].length - a[1].length)
+      .slice(0, 20)
       .map(([topic, notes]) => ({
         topic: topic.charAt(0).toUpperCase() + topic.slice(1),
         notes,

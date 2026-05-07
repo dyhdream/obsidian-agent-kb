@@ -510,9 +510,9 @@ export default class AgentKBPlugin extends Plugin {
         notice.setMessage(`Agent KB: 更新语义库 (${cur}/${total})`);
       });
 
-      // Phase 2: 发现连接
+      // Phase 2: 发现连接（算法，瞬间完成）
       notice.setMessage("Agent KB: 发现笔记连接...");
-      const connections = await this.semanticLibrary.discoverConnections();
+      const connections = this.semanticLibrary.discoverConnections();
 
       // Phase 3: 聚类建议
       const folderSuggestions = this.semanticLibrary.getFolderSuggestions();
