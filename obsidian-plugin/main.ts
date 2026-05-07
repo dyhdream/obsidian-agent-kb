@@ -235,7 +235,63 @@ export default class AgentKBPlugin extends Plugin {
         }
       };
     }
+
+    if (s.type === "concept") {
+      // 从 "可新建: XXX" 中提取概念名
+      const conceptName = s.title.replace(/^可新建:\s*/, "").trim();
+      if (!conceptName) return undefined;
+      return () => this.createNoteAndOpen(conceptName, "concept");
+    }
+
+    if (s.type === "moc") {
+      // 从 "建议创建 MOC: XXX" 中提取主题名
+      const topic = s.title.replace(/^建议创建\s*MOC:\s*/, "").trim();
+      if (!topic) return undefined;
+      return () => this.createNoteAndOpen(`${topic} MOC`, "moc", topic);
+    }
+
     return undefined;
+  }
+
+  /**
+   * 创建新笔记并打开
+   */
+  private async createNoteAndOpen(title: string, type: "concept" | "moc", topic?: string): Promise<void> {
+    const today = new Date().toISOString().slice(0, 10);
+    const tags = type === "moc" ? ["moc"] : [];
+
+    let content = "---\n";
+    content += `created: ${today}\n`;
+    if (tags.length > 0) {
+      content += `tags: [${tags.join(", ")}]\n`;
+    }
+    content += "---\n\n";
+
+    if (type === "moc" && topic) {
+      content += `## ${title}\n\n`;
+      content += `> [!note] MOC（Map of Content）\n> ${topic} 相关笔记的导航页。\n\n`;
+      content += `### 相关笔记\n\n`;
+      content += `<!-- 在此添加相关笔记的链接 -->\n`;
+    } else {
+      content += `## ${title}\n\n`;
+      content += `<!-- 在此开始写作 -->\n`;
+    }
+
+    const fileName = `${title}.md`;
+
+    // 检查是否已存在
+    const existing = this.app.vault.getAbstractFileByPath(fileName);
+    if (existing) {
+      new Notice(`笔记 "${fileName}" 已存在`);
+      const leaf = this.app.workspace.getLeaf(false);
+      await leaf.openFile(existing as TFile);
+      return;
+    }
+
+    const file = await this.app.vault.create(fileName, content);
+    const leaf = this.app.workspace.getLeaf(false);
+    await leaf.openFile(file);
+    new Notice(`已创建笔记: ${title}`);
   }
 
   private extractTags(content: string): string[] {
