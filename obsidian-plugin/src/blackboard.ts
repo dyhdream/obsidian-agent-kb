@@ -123,6 +123,7 @@ interface BlackboardData {
   current: Partial<NoteContext>;
   vault: VaultInfo;
   similar: SimilarNote[];
+  related: RelatedNoteProfile[];   // 语义库返回的相近笔记
   context: {
     sameDir: TitleEntry[];
     matched: TitleEntry[];
@@ -132,11 +133,21 @@ interface BlackboardData {
   session: SessionInfo;
 }
 
+export interface RelatedNoteProfile {
+  path: string;
+  title: string;
+  summary: string;
+  keyTopics: string[];
+  score: number;
+  reason: string;
+}
+
 export class Blackboard {
   private data: BlackboardData = {
     current: {},
     vault: { totalNotes: 0, allTitles: [], existingTags: [] },
     similar: [],
+    related: [],
     context: { sameDir: [], matched: [] },
     findings: {},
     review: { suggestions: [], summary: "" },

@@ -4,7 +4,7 @@
  */
 
 import { Agent } from "../agent_base";
-import { TitleEntry } from "../blackboard";
+import { TitleEntry, RelatedNoteProfile } from "../blackboard";
 
 const LINK_WEAVER_PERSONA = `你是 Obsidian 知识库的「链接师」(Link Weaver)。你的工作是发现笔记之间的关联。
 
@@ -43,7 +43,7 @@ export class LinkWeaver extends Agent {
     const current = this.blackboard.read("current");
     const vault = this.blackboard.read("vault");
     const context = this.blackboard.read("context");
-    const similar = this.blackboard.read("similar");
+    const related = this.blackboard.read("related");
     const findings = this.blackboard.read("findings");
 
     const content = current.content;
@@ -60,39 +60,60 @@ export class LinkWeaver extends Agent {
       ? existing.slice(0, 15).map((w) => `[[${w}]]`).join(", ")
       : "无";
 
-    // 优先排序标题列表（最多 30 个）
-    const seenPaths = new Set<string>();
-    const prioritized: string[] = [];
-    const addTitles = (entries: TitleEntry[]) => {
-      for (const n of entries) {
-        if (seenPaths.has(n.path)) continue;
-        seenPaths.add(n.path);
-        prioritized.push(n.title);
-        if (prioritized.length >= 30) return;
+    // 语义相近笔记（优先级最高）
+    let relatedStr = "无";
+    if (related.length > 0) {
+      relatedStr = related
+        .slice(0, 10)
+        .map(
+          (r) =>
+            `- ${r.title} (${r.keyTopics.slice(0, 3).join(", ")}) — ${r.summary}`
+        )
+        .join("\n");
+    }
+
+    // 同目录笔记
+    const sameDirStr =
+      context.sameDir.length > 0
+        ? context.sameDir.map((n) => `- ${n.title}`).join("\n")
+        : "无";
+
+    // 补充标题列表（语义库覆盖不到的）
+    const seenTitles = new Set(related.map((r) => r.title.toLowerCase()));
+    const additionalTitles: string[] = [];
+    for (const n of context.sameDir) {
+      if (!seenTitles.has(n.title.toLowerCase())) {
+        additionalTitles.push(n.title);
+        seenTitles.add(n.title.toLowerCase());
       }
-    };
-    addTitles(context.sameDir);
-    addTitles(context.matched);
-    for (const s of similar) {
-      if (seenPaths.has(s.path)) continue;
-      seenPaths.add(s.path);
-      prioritized.push(s.title);
-      if (prioritized.length >= 30) break;
     }
-    if (prioritized.length < 30) {
-      addTitles(vault.allTitles);
+    for (const n of context.matched) {
+      if (!seenTitles.has(n.title.toLowerCase()) && additionalTitles.length < 15) {
+        additionalTitles.push(n.title);
+        seenTitles.add(n.title.toLowerCase());
+      }
     }
-    const titlesStr = prioritized.map((t) => `- ${t}`).join("\n");
+    const additionalStr =
+      additionalTitles.length > 0
+        ? additionalTitles.map((t) => `- ${t}`).join("\n")
+        : "无";
 
     return `当前笔记: ${current.title}
 标签: ${current.tags.join(", ")}
 
 已有链接（不要重复）: ${existingStr}
 
-可用笔记（${prioritized.length} 篇，只有这些可建议 [[链接]]）:
-${titlesStr}
+◇ 语义相近笔记（最高优先级，语义上最可能需要链接）:
+${relatedStr}
+
+◇ 同目录笔记:
+${sameDirStr}
+
+◇ 其他相关笔记:
+${additionalStr}
 
 核心实体: ${keyEntities.slice(0, 8).join(", ")}
+笔记总数: ${vault.totalNotes}
 
 输出 JSON。`;
   }

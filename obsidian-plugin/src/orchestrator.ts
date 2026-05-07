@@ -1,7 +1,6 @@
 /**
- * 编排器 — Agent 协作工作流（优化版）
- * 情报员(纯本地) → 链接师+架构师(并行) → 品控官(后台异步)
- * 首屏建议先行：链接师+架构师完成后立即展示，品控官后台精化后回调更新
+ * 编排器 — Agent 协作工作流（语义库增强版）
+ * 情报员(语义库扫描) → 链接师+架构师(并行) → 品控官(后台异步)
  */
 
 import { App, TFile } from "obsidian";
@@ -10,7 +9,7 @@ import { ContextScout } from "./agents/context_scout";
 import { LinkWeaver } from "./agents/link_weaver";
 import { StructureGuardian } from "./agents/structure_guardian";
 import { Reviewer } from "./agents/reviewer";
-import { extractKeyEntities } from "./vault_context";
+import { SemanticLibrary } from "./semantic_library";
 import { PreferenceLearner } from "./preference_learner";
 import { sessionMemory } from "./session_memory";
 import { AgentKBSettings } from "../settings";
@@ -19,31 +18,37 @@ export type AnalysisPhase = "scout" | "agents" | "reviewer" | "done";
 
 export interface AnalysisCallbacks {
   onPhase?: (phase: AnalysisPhase, label: string) => void;
-  onPhase2Complete?: (suggestions: FinalSuggestion[]) => void;
   onReviewerComplete?: (suggestions: FinalSuggestion[]) => void;
 }
 
 export class Orchestrator {
   private settings: AgentKBSettings;
   private preferenceLearner: PreferenceLearner;
+  private semanticLibrary?: SemanticLibrary;
 
-  constructor(settings: AgentKBSettings, preferenceLearner: PreferenceLearner) {
+  constructor(
+    settings: AgentKBSettings,
+    preferenceLearner: PreferenceLearner,
+    semanticLibrary?: SemanticLibrary
+  ) {
     this.settings = settings;
     this.preferenceLearner = preferenceLearner;
+    this.semanticLibrary = semanticLibrary;
   }
 
   updateSettings(settings: AgentKBSettings): void {
     this.settings = settings;
   }
 
+  updateSemanticLibrary(lib: SemanticLibrary): void {
+    this.semanticLibrary = lib;
+  }
+
   /**
-   * 分析流程（优化版）：
-   * 1. scanVault（纯本地，瞬间完成）
-   * 2. 客户端提取 keyEntities（替代 ContextScout LLM，瞬间完成）
-   * 3. LinkWeaver + StructureGuardian 并行 → 回调通知首屏建议
-   * 4. Reviewer 后台异步 → 回调通知精化建议
-   *
-   * 返回的 Promise 在阶段 3 完成后 resolve（不等 Reviewer）
+   * 分析流程：
+   * 1. 语义库扫描上下文 + 客户端 keyEntities（瞬间完成）
+   * 2. LinkWeaver + StructureGuardian 并行
+   * 3. Reviewer 后台异步
    */
   async analyze(
     app: App,
@@ -55,26 +60,25 @@ export class Orchestrator {
     const bb = new Blackboard();
     bb.clearSession();
 
-    // Phase 1: 情报员扫描（纯 Obsidian API，< 0.1s）
+    // Phase 1: 情报员扫描（Obsidian API + 语义库，< 0.1s）
     callbacks?.onPhase?.("scout", "扫描知识库...");
-    ContextScout.scanVault(app, file, content, tags, bb);
+    ContextScout.scanVault(app, file, content, tags, bb, this.semanticLibrary);
 
-    // 客户端提取 keyEntities（替代 ContextScout LLM，0 LLM 调用）
-    const keyEntities = extractKeyEntities(content, tags);
-    bb.updateFindings({ keyEntities });
+    // 增量更新当前笔记的 NoteProfile（异步，不阻塞）
+    if (this.semanticLibrary) {
+      this.semanticLibrary.generateProfile(file, app).catch(() => {});
+    }
 
-    // Phase 2: 链接师 + 架构师 并行（~6-8s）
+    // Phase 2: 链接师 + 架构师 并行
     callbacks?.onPhase?.("agents", "链接师 & 架构师分析中...");
     await Promise.all([
       new LinkWeaver(bb, this.settings, this.preferenceLearner).run(),
       new StructureGuardian(bb, this.settings, this.preferenceLearner).run(),
     ]);
 
-    // 首屏建议：立即构建并通知
     const phase2Suggestions = this.buildIntermediateSuggestions(bb, file.path);
-    callbacks?.onPhase2Complete?.(phase2Suggestions);
 
-    // Phase 3: 品控官后台异步（不阻塞返回）
+    // Phase 3: 品控官后台异步
     callbacks?.onPhase?.("reviewer", "品控官审核中...");
     this.runReviewerAsync(bb, callbacks);
 
@@ -82,9 +86,6 @@ export class Orchestrator {
     return phase2Suggestions;
   }
 
-  /**
-   * 后台运行 Reviewer，完成后通过回调通知
-   */
   private async runReviewerAsync(bb: Blackboard, callbacks?: AnalysisCallbacks): Promise<void> {
     try {
       await new Reviewer(bb, this.settings, this.preferenceLearner).run();

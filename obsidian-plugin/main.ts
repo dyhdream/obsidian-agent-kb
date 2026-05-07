@@ -13,6 +13,7 @@ import { Orchestrator, AnalysisCallbacks } from "./src/orchestrator";
 import { PreferenceLearner } from "./src/preference_learner";
 import { FinalSuggestion } from "./src/blackboard";
 import { parseJson } from "./src/utils";
+import { SemanticLibrary, LibraryData, NoteProfile } from "./src/semantic_library";
 
 interface Suggestion {
   id: string;
@@ -100,6 +101,7 @@ export default class AgentKBPlugin extends Plugin {
   settings: AgentKBSettings;
   private orchestrator: Orchestrator | null = null;
   private preferenceLearner: PreferenceLearner | null = null;
+  private semanticLibrary: SemanticLibrary | null = null;
   private debounceTimer: number | null = null;
   private isAnalyzing = false;
   private modalOpen = false;
@@ -122,9 +124,37 @@ export default class AgentKBPlugin extends Plugin {
       savedPrefs
     );
 
-    this.orchestrator = new Orchestrator(this.settings, this.preferenceLearner);
+    // 初始化语义库
+    const savedLibrary = (await this.loadData())?.semanticLibrary;
+    this.semanticLibrary = new SemanticLibrary(
+      (data) => {
+        this.saveData({ ...this.data, semanticLibrary: data });
+      },
+      savedLibrary
+    );
+
+    // 初始化编排器（注入语义库）
+    this.orchestrator = new Orchestrator(
+      this.settings,
+      this.preferenceLearner,
+      this.semanticLibrary
+    );
+
+    // 注册事件和命令
     this.app.vault.on("modify", this.onFileSave.bind(this));
     this.addSettingTab(new AgentKBSettingTab(this.app, this));
+
+    this.addCommand({
+      id: "rebuild-semantic-library",
+      name: "重建语义库",
+      callback: () => this.rebuildSemanticLibrary(),
+    });
+
+    this.addCommand({
+      id: "batch-analyze",
+      name: "一键分析全部笔记",
+      callback: () => this.batchAnalyze(),
+    });
   }
 
   async onFileSave(file: TFile) {
@@ -431,6 +461,94 @@ export default class AgentKBPlugin extends Plugin {
     return hashArray.map((b) => b.toString(16).padStart(2, "0")).join("");
   }
 
+  // ──────────────────────────────────────────
+  // 语义库：重建 / 一键分析
+  // ──────────────────────────────────────────
+
+  /**
+   * 命令：重建语义库
+   * 全量处理所有笔记，生成 NoteProfile，发现连接，聚类
+   */
+  private async rebuildSemanticLibrary(): Promise<void> {
+    if (!this.semanticLibrary) return;
+
+    const notice = new Notice("Agent KB: 正在构建语义库...", 0);
+
+    try {
+      const result = await this.semanticLibrary.buildAll(
+        this.app,
+        (current, total, title) => {
+          notice.setMessage(`Agent KB: 分析中 (${current}/${total}) ${title}`);
+        }
+      );
+
+      notice.hide();
+      new Notice(
+        `Agent KB: 语义库已重建（${result.updated} 篇更新，${result.skipped} 篇跳过）`,
+        5000
+      );
+    } catch (e) {
+      notice.hide();
+      new Notice("Agent KB: 语义库重建失败，请检查 API Key", 5000);
+      console.error("语义库重建失败:", e);
+    }
+  }
+
+  /**
+   * 命令：一键分析全部笔记
+   * 静默运行：发现连接 + 目录分类 + MOC 建议 → 通知 → 报告弹窗
+   */
+  private async batchAnalyze(): Promise<void> {
+    if (!this.semanticLibrary) return;
+
+    const notice = new Notice("Agent KB: 一键分析中...", 0);
+
+    try {
+      // Phase 1: 确保语义库是最新的
+      notice.setMessage("Agent KB: 更新语义库...");
+      await this.semanticLibrary.buildAll(this.app, (cur, total) => {
+        notice.setMessage(`Agent KB: 更新语义库 (${cur}/${total})`);
+      });
+
+      // Phase 2: 发现连接
+      notice.setMessage("Agent KB: 发现笔记连接...");
+      const connections = await this.semanticLibrary.discoverConnections();
+
+      // Phase 3: 聚类建议
+      const folderSuggestions = this.semanticLibrary.getFolderSuggestions();
+      const mocSuggestions = this.semanticLibrary.getMocSuggestions();
+
+      notice.hide();
+
+      // 构建报告
+      const totalSuggestions =
+        connections.length + folderSuggestions.length + mocSuggestions.length;
+
+      if (totalSuggestions === 0) {
+        new Notice("Agent KB: 分析完成，暂无优化建议", 3000);
+        return;
+      }
+
+      new Notice(
+        `Agent KB: 发现 ${connections.length} 条链接 + ${folderSuggestions.length} 个文件夹 + ${mocSuggestions.length} 个 MOC 建议`,
+        5000
+      );
+
+      // 打开报告弹窗
+      new BatchReportModal(
+        this.app,
+        this,
+        connections,
+        folderSuggestions,
+        mocSuggestions
+      ).open();
+    } catch (e) {
+      notice.hide();
+      new Notice("Agent KB: 一键分析失败，请检查 API Key", 5000);
+      console.error("一键分析失败:", e);
+    }
+  }
+
   async sendFeedback(actionType: string, suggestion: string, accepted: boolean) {
     this.orchestrator?.recordFeedback(actionType, suggestion, accepted);
   }
@@ -443,6 +561,141 @@ export default class AgentKBPlugin extends Plugin {
     await this.saveData(this.settings);
     initClient(this.settings);
     this.orchestrator?.updateSettings(this.settings);
+  }
+}
+
+// ──────────────────────────────────────────
+// 批量分析报告弹窗
+// ──────────────────────────────────────────
+
+class BatchReportModal extends Modal {
+  private plugin: AgentKBPlugin;
+  private connections: Array<{
+    source: string;
+    target: string;
+    reason: string;
+    confidence: number;
+  }>;
+  private folderSuggestions: Array<{
+    category: string;
+    notes: NoteProfile[];
+    suggestedFolder: string;
+  }>;
+  private mocSuggestions: Array<{
+    topic: string;
+    notes: NoteProfile[];
+    reason: string;
+  }>;
+
+  constructor(
+    app: App,
+    plugin: AgentKBPlugin,
+    connections: Array<{
+      source: string;
+      target: string;
+      reason: string;
+      confidence: number;
+    }>,
+    folderSuggestions: Array<{
+      category: string;
+      notes: NoteProfile[];
+      suggestedFolder: string;
+    }>,
+    mocSuggestions: Array<{
+      topic: string;
+      notes: NoteProfile[];
+      reason: string;
+    }>
+  ) {
+    super(app);
+    this.plugin = plugin;
+    this.connections = connections;
+    this.folderSuggestions = folderSuggestions;
+    this.mocSuggestions = mocSuggestions;
+  }
+
+  onOpen() {
+    this.plugin.setModalOpen(true);
+    const { contentEl } = this;
+    contentEl.addClass("agent-kb-modal");
+
+    contentEl.createEl("h3", { text: "Agent KB 一键分析报告" });
+
+    // ── 链接建议 ──
+    if (this.connections.length > 0) {
+      const section = contentEl.createDiv({ cls: "agent-kb-section" });
+      section.createEl("h4", {
+        text: `🔗 链接建议 (${this.connections.length} 条)`,
+      });
+
+      for (const conn of this.connections.slice(0, 30)) {
+        const item = section.createDiv({ cls: "agent-kb-item" });
+        const content = item.createDiv({ cls: "agent-kb-item-content" });
+        const sourceName = conn.source.replace(/\.md$/, "");
+        const targetName = conn.target.replace(/\.md$/, "");
+        content.createDiv({
+          text: `${sourceName} → ${targetName} (${(conn.confidence * 100).toFixed(0)}%)`,
+        });
+        content.createDiv({
+          text: conn.reason,
+          cls: "agent-kb-item-reason",
+        });
+      }
+      if (this.connections.length > 30) {
+        section.createEl("p", {
+          text: `... 还有 ${this.connections.length - 30} 条`,
+          cls: "agent-kb-item-reason",
+        });
+      }
+    }
+
+    // ── 文件夹分类 ──
+    if (this.folderSuggestions.length > 0) {
+      const section = contentEl.createDiv({ cls: "agent-kb-section" });
+      section.createEl("h4", {
+        text: `📁 目录分类建议 (${this.folderSuggestions.length} 个文件夹)`,
+      });
+
+      for (const folder of this.folderSuggestions) {
+        const item = section.createDiv({ cls: "agent-kb-item" });
+        const content = item.createDiv({ cls: "agent-kb-item-content" });
+        content.createDiv({
+          text: `${folder.suggestedFolder}/ (${folder.notes.length} 篇)`,
+        });
+        content.createDiv({
+          text: folder.notes
+            .slice(0, 5)
+            .map((n) => n.title)
+            .join(", ") + (folder.notes.length > 5 ? "..." : ""),
+          cls: "agent-kb-item-reason",
+        });
+      }
+    }
+
+    // ── MOC 建议 ──
+    if (this.mocSuggestions.length > 0) {
+      const section = contentEl.createDiv({ cls: "agent-kb-section" });
+      section.createEl("h4", {
+        text: `🗂 MOC 建议 (${this.mocSuggestions.length} 个)`,
+      });
+
+      for (const moc of this.mocSuggestions) {
+        const item = section.createDiv({ cls: "agent-kb-item" });
+        const content = item.createDiv({ cls: "agent-kb-item-content" });
+        content.createDiv({
+          text: `${moc.topic} MOC (${moc.notes.length} 篇相关)`,
+        });
+        content.createDiv({
+          text: moc.reason,
+          cls: "agent-kb-item-reason",
+        });
+      }
+    }
+  }
+
+  onClose() {
+    this.plugin.setModalOpen(false);
+    this.contentEl.empty();
   }
 }
 
