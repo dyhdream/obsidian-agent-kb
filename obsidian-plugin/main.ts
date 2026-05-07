@@ -384,6 +384,48 @@ export default class AgentKBPlugin extends Plugin {
   }
 
   /**
+   * 批量分析专用：创建 MOC 笔记，自动填充所有相关笔记的链接
+   */
+  async createMocNote(topic: string, notes: NoteProfile[]): Promise<void> {
+    const today = new Date().toISOString().slice(0, 10);
+    const title = `${topic} MOC`;
+
+    const noteLinks = notes.map((n) => `- [[${n.title}]]`).join("\n");
+
+    const content = [
+      "---",
+      `created: ${today}`,
+      "tags: [moc]",
+      "---",
+      "",
+      `## ${title}`,
+      "",
+      `> [!note] MOC（Map of Content）`,
+      `> ${notes.length} 篇笔记涉及「${topic}」主题的导航页。`,
+      "",
+      "### 相关笔记",
+      "",
+      noteLinks,
+      "",
+    ].join("\n");
+
+    const fileName = `${title}.md`;
+
+    const existing = this.app.vault.getAbstractFileByPath(fileName);
+    if (existing) {
+      new Notice(`笔记 "${fileName}" 已存在`);
+      const leaf = this.app.workspace.getLeaf(false);
+      await leaf.openFile(existing as TFile);
+      return;
+    }
+
+    const file = await this.app.vault.create(fileName, content);
+    const leaf = this.app.workspace.getLeaf(false);
+    await leaf.openFile(file);
+    new Notice(`已创建 MOC: ${title} (${notes.length} 篇相关)`);
+  }
+
+  /**
    * 调用 DeepSeek 生成新概念笔记内容（严格 Obsidian 格式）
    */
   private async generateConceptContent(
@@ -496,36 +538,38 @@ export default class AgentKBPlugin extends Plugin {
 
   /**
    * 命令：一键分析全部笔记
-   * 静默运行：发现连接 + 目录分类 + MOC 建议 → 通知 → 报告弹窗
+   * 直接使用已有语义库，不做 rebuild
    */
   private async batchAnalyze(): Promise<void> {
     if (!this.semanticLibrary) return;
 
+    // 空库检查
+    if (this.semanticLibrary.getProfileCount() === 0) {
+      new Notice("Agent KB: 语义库为空，请先运行「重建语义库」", 5000);
+      return;
+    }
+
     const notice = new Notice("Agent KB: 一键分析中...", 0);
 
     try {
-      // Phase 1: 确保语义库是最新的
-      notice.setMessage("Agent KB: 更新语义库...");
-      await this.semanticLibrary.buildAll(this.app, (cur, total) => {
-        notice.setMessage(`Agent KB: 更新语义库 (${cur}/${total})`);
-      });
-
-      // Phase 2: 发现连接（算法，瞬间完成）
+      // 直接用已有语义库，不 rebuild
       notice.setMessage("Agent KB: 发现笔记连接...");
       const connections = this.semanticLibrary.discoverConnections();
 
-      // Phase 3: 聚类建议
+      notice.setMessage("Agent KB: 聚类分析...");
       const folderSuggestions = this.semanticLibrary.getFolderSuggestions();
       const mocSuggestions = this.semanticLibrary.getMocSuggestions();
 
       notice.hide();
 
-      // 构建报告
       const totalSuggestions =
         connections.length + folderSuggestions.length + mocSuggestions.length;
 
       if (totalSuggestions === 0) {
-        new Notice("Agent KB: 分析完成，暂无优化建议", 3000);
+        new Notice(
+          `Agent KB: 分析完成（语义库 ${this.semanticLibrary.getProfileCount()} 篇），暂无满足阈值的建议`,
+          5000
+        );
         return;
       }
 
@@ -534,7 +578,6 @@ export default class AgentKBPlugin extends Plugin {
         5000
       );
 
-      // 打开报告弹窗
       new BatchReportModal(
         this.app,
         this,
@@ -565,7 +608,7 @@ export default class AgentKBPlugin extends Plugin {
 }
 
 // ──────────────────────────────────────────
-// 批量分析报告弹窗
+// 批量分析报告弹窗（带执行按钮）
 // ──────────────────────────────────────────
 
 class BatchReportModal extends Modal {
@@ -624,8 +667,21 @@ class BatchReportModal extends Modal {
     // ── 链接建议 ──
     if (this.connections.length > 0) {
       const section = contentEl.createDiv({ cls: "agent-kb-section" });
-      section.createEl("h4", {
+      const headerRow = section.createDiv({ cls: "agent-kb-section-header" });
+      headerRow.createEl("span", {
         text: `🔗 链接建议 (${this.connections.length} 条)`,
+      });
+
+      // 全部采纳按钮
+      const acceptAllBtn = headerRow.createSpan({ cls: "agent-kb-btn-accept" });
+      acceptAllBtn.setText("全部采纳");
+      acceptAllBtn.addEventListener("click", async () => {
+        let added = 0;
+        for (const conn of this.connections) {
+          const ok = await this.addLink(conn.source, conn.target);
+          if (ok) added++;
+        }
+        new Notice(`Agent KB: 已添加 ${added} 条链接`, 3000);
       });
 
       for (const conn of this.connections.slice(0, 30)) {
@@ -634,11 +690,22 @@ class BatchReportModal extends Modal {
         const sourceName = conn.source.replace(/\.md$/, "");
         const targetName = conn.target.replace(/\.md$/, "");
         content.createDiv({
-          text: `${sourceName} → ${targetName} (${(conn.confidence * 100).toFixed(0)}%)`,
+          text: `${sourceName} → [[${targetName}]] (${(conn.confidence * 100).toFixed(0)}%)`,
         });
         content.createDiv({
           text: conn.reason,
           cls: "agent-kb-item-reason",
+        });
+
+        const actions = item.createDiv({ cls: "agent-kb-item-actions" });
+        const addBtn = actions.createSpan({ cls: "agent-kb-btn-accept" });
+        addBtn.setText("✓ 添加链接");
+        addBtn.addEventListener("click", async () => {
+          const ok = await this.addLink(conn.source, conn.target);
+          if (ok) {
+            new Notice(`已添加: ${sourceName} → [[${targetName}]]`, 3000);
+            item.hide();
+          }
         });
       }
       if (this.connections.length > 30) {
@@ -652,8 +719,9 @@ class BatchReportModal extends Modal {
     // ── 文件夹分类 ──
     if (this.folderSuggestions.length > 0) {
       const section = contentEl.createDiv({ cls: "agent-kb-section" });
-      section.createEl("h4", {
+      section.createEl("span", {
         text: `📁 目录分类建议 (${this.folderSuggestions.length} 个文件夹)`,
+        cls: "agent-kb-section-header",
       });
 
       for (const folder of this.folderSuggestions) {
@@ -663,11 +731,25 @@ class BatchReportModal extends Modal {
           text: `${folder.suggestedFolder}/ (${folder.notes.length} 篇)`,
         });
         content.createDiv({
-          text: folder.notes
-            .slice(0, 5)
-            .map((n) => n.title)
-            .join(", ") + (folder.notes.length > 5 ? "..." : ""),
+          text:
+            folder.notes
+              .slice(0, 5)
+              .map((n) => n.title)
+              .join(", ") + (folder.notes.length > 5 ? "..." : ""),
           cls: "agent-kb-item-reason",
+        });
+
+        const actions = item.createDiv({ cls: "agent-kb-item-actions" });
+        const moveBtn = actions.createSpan({ cls: "agent-kb-btn-accept" });
+        moveBtn.setText(`移动 ${folder.notes.length} 篇`);
+        moveBtn.addEventListener("click", async () => {
+          let moved = 0;
+          for (const note of folder.notes) {
+            const ok = await this.moveToFolder(note.path, folder.suggestedFolder);
+            if (ok) moved++;
+          }
+          new Notice(`Agent KB: 已移动 ${moved} 篇到 ${folder.suggestedFolder}/`, 3000);
+          item.hide();
         });
       }
     }
@@ -675,8 +757,9 @@ class BatchReportModal extends Modal {
     // ── MOC 建议 ──
     if (this.mocSuggestions.length > 0) {
       const section = contentEl.createDiv({ cls: "agent-kb-section" });
-      section.createEl("h4", {
+      section.createEl("span", {
         text: `🗂 MOC 建议 (${this.mocSuggestions.length} 个)`,
+        cls: "agent-kb-section-header",
       });
 
       for (const moc of this.mocSuggestions) {
@@ -689,7 +772,68 @@ class BatchReportModal extends Modal {
           text: moc.reason,
           cls: "agent-kb-item-reason",
         });
+
+        const actions = item.createDiv({ cls: "agent-kb-item-actions" });
+        const createBtn = actions.createSpan({ cls: "agent-kb-btn-accept" });
+        createBtn.setText("创建 MOC");
+        createBtn.addEventListener("click", async () => {
+          await this.plugin.createMocNote(moc.topic, moc.notes);
+          item.hide();
+        });
       }
+    }
+  }
+
+  /**
+   * 在源笔记末尾追加指向目标笔记的链接
+   */
+  private async addLink(sourcePath: string, targetPath: string): Promise<boolean> {
+    try {
+      const file = this.app.vault.getAbstractFileByPath(sourcePath);
+      if (!(file instanceof TFile)) return false;
+
+      const content = await this.app.vault.read(file);
+      const targetName = targetPath.replace(/\.md$/, "");
+
+      // 已经有这个链接就不重复添加
+      if (content.includes(`[[${targetName}]]`) || content.includes(`[[${targetName}|`)) {
+        return false;
+      }
+
+      // 追加到文件末尾（换行 + 链接）
+      const newContent = content.trimEnd() + `\n\n[[${targetName}]]\n`;
+      await this.app.vault.modify(file, newContent);
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  /**
+   * 移动笔记到目标文件夹
+   */
+  private async moveToFolder(notePath: string, folder: string): Promise<boolean> {
+    try {
+      const file = this.app.vault.getAbstractFileByPath(notePath);
+      if (!(file instanceof TFile)) return false;
+
+      // 确保目标文件夹存在
+      const folderPath = folder.endsWith("/") ? folder : folder + "/";
+      const existingFolder = this.app.vault.getAbstractFileByPath(folderPath);
+      if (!existingFolder) {
+        await this.app.vault.createFolder(folderPath);
+      }
+
+      const fileName = notePath.split("/").pop() || notePath;
+      const newPath = folderPath + fileName;
+
+      // 目标路径已存在则跳过
+      if (this.app.vault.getAbstractFileByPath(newPath)) return false;
+
+      await this.app.vault.rename(file, newPath);
+      return true;
+    } catch {
+      return false;
     }
   }
 
